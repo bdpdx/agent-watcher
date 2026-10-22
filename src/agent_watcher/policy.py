@@ -12,6 +12,7 @@ A gap in the refuse list therefore means "the GM decides", never "waved through"
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
 import time
@@ -60,6 +61,55 @@ def _segments(script: str) -> list[list[str]] | None:
             words = words[1:]
         if words:
             out.append(words)
+    return out
+
+
+# Commands that write to the paths they're given (all non-option arguments, or for copy-like ones the last).
+_WRITES_ALL = {"rm", "rmdir", "mkdir", "touch", "chmod", "chown", "tee", "truncate"}
+_WRITES_LAST = {"cp", "mv", "ln", "install", "rsync"}
+_REDIRECT = re.compile(r"^\d?(>>?)(.*)$")
+# Temporary and scratch locations any agent may write to.
+_TEMP_ROOTS = [Path("/tmp"), Path("/private/tmp"), Path("/var/folders"), Path("/private/var/folders"), Path("/dev")]
+
+
+def write_targets(script: str, cwd: Path) -> list[Path]:
+    """Paths the shell `script` writes to: redirections, `tee`, `rm`/`mkdir`/`touch`/…, the destination of
+    `cp`/`mv`/`ln`, and `sed -i` files. Paths through unexpanded variables are skipped (they can't be judged)."""
+    segs = _segments(script) or []
+    here, out = cwd, []
+
+    def add(word: str) -> None:
+        if not word or "$" in word or word.startswith("&") or "`" in word:
+            return
+        q = Path(word).expanduser()
+        out.append(q if q.is_absolute() else here / q)
+
+    for words in segs:
+        cmd = words[0].rsplit("/", 1)[-1]
+        if cmd == "cd" and len(words) > 1 and "$" not in words[1]:
+            q = Path(words[1]).expanduser()
+            here = q if q.is_absolute() else here / q
+            continue
+        args = []
+        i = 1
+        while i < len(words):
+            w = words[i]
+            if m := _REDIRECT.match(w):
+                target = m.group(2) or (words[i + 1] if i + 1 < len(words) else "")
+                add(target)
+                i += 1 if m.group(2) else 2
+                continue
+            args.append(w)
+            i += 1
+        plain = [a for a in args if not a.startswith("-")]
+        if cmd in _WRITES_ALL:
+            for a in plain[1:] if cmd in ("chmod", "chown") else plain:
+                add(a)
+        elif cmd in _WRITES_LAST and len(plain) >= 2:
+            add(plain[-1])
+        elif cmd == "sed" and any(a == "-i" or a.startswith("-i") for a in args) and len(plain) >= 2:
+            for a in plain[1:]:
+                add(a)
     return out
 
 
@@ -118,6 +168,24 @@ class Policy:
                 return a
         return None
 
+    def _allowed_write(self, agent: AgentConfig, p: Path) -> bool:
+        """Inside the agent's clone/worktrees, project-state, its own home, or a temporary location."""
+        r = p.expanduser().resolve()
+        roots = [self.cfg.project_state_dir, agent.config_dir, *_TEMP_ROOTS]
+        if tmp := os.environ.get("TMPDIR"):
+            roots.append(Path(tmp))
+        return agent.owns_path(r) or any(r == x.resolve() or x.resolve() in r.parents for x in roots)
+
+    def _writes_outside(self, agent: AgentConfig, tool_name: str, tool_input: dict, cmd: str, cwd: str) -> str:
+        """The first written path outside the project's folders, or ""."""
+        base = Path(tool_input.get("cwd") or cwd or agent.clone).expanduser()
+        if tool_name in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
+            path = tool_input.get("file_path") or tool_input.get("notebook_path")
+            targets = [Path(path).expanduser()] if isinstance(path, str) and path else []
+        else:
+            targets = write_targets(cmd, base) if cmd else []
+        return next((str(t) for t in targets if not self._allowed_write(agent, t)), "")
+
     def evaluate(self, agent: AgentConfig, tool_name: str, tool_input: dict, cwd: str) -> PolicyResult:
         cmd = command_of(tool_input) or ""
         blob = f"{tool_name} {cmd} {describe_action(tool_name, tool_input)}"
@@ -127,6 +195,8 @@ class Policy:
         for rx in self._refuse:
             if rx.search(blob):
                 return PolicyResult(Verdict.REFUSE, f"refuse: {rx.pattern}")
+        if outside := self._writes_outside(agent, tool_name, tool_input, cmd, cwd):
+            return PolicyResult(Verdict.REFUSE, f"refuse: writes outside the project's folders ({outside})")
 
         auto: PolicyResult | None = None
         notes: list[str] = []

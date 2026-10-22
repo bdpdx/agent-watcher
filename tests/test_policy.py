@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from agent_watcher.policy import Policy, Verdict
 
 
@@ -68,3 +70,26 @@ def test_rate_cap_sends_auto_approvals_to_gm(cfg):
         p.record_approval("claude-a")
     r = p.evaluate(a, "Bash", {"command": "git status"}, str(a.clone))
     assert r.verdict is Verdict.GM and "rate cap" in r.rule
+
+
+def test_writes_outside_the_projects_folders_are_refused(cfg):
+    a = cfg.agents["codex-a"]
+    for cmd in ("echo x > ~/.zshrc", "cp build/app /usr/local/bin/app", "mkdir -p /opt/thing && touch /opt/thing/x",
+                "sed -i '' s/a/b/ /etc/hosts", "printf hi | tee ~/Library/LaunchAgents/x.plist"):
+        r = ev(cfg, "codex-a", cmd)
+        assert r.verdict is Verdict.REFUSE and "outside the project's folders" in r.rule, cmd
+    r = Policy(cfg).evaluate(a, "Write", {"file_path": "/Users/someone-else/notes.md"}, str(a.clone))
+    assert r.verdict is Verdict.REFUSE
+
+
+def test_writes_inside_the_project_temp_or_own_home_are_not_refused(cfg):
+    a = cfg.agents["codex-a"]
+    for cmd in ("echo x > out.log 2>&1", f"cp a.txt {a.clone}/b.txt", "mkdir -p /tmp/run && rm -rf /tmp/run",
+                f"touch {cfg.project_state_dir}/note", f"echo hi > {a.config_dir}/memory.md", "cmd >/dev/null 2>&1",
+                'cp x "$SP/out"'):
+        assert ev(cfg, "codex-a", cmd).verdict is not Verdict.REFUSE, cmd
+
+
+def test_write_targets_follow_cd_and_redirects(tmp_path):
+    from agent_watcher.policy import write_targets
+    assert write_targets("cd /srv && echo x >> log.txt; mv a b/", tmp_path) == [Path("/srv/log.txt"), Path("/srv/b")]

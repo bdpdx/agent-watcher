@@ -9,12 +9,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from .assess import AssessConfig
+
 Kind = Literal["claude", "codex"]
 Mode = Literal["off", "dry", "live"]
 
 # "channel" governs posting to Slack; the rest govern keystrokes.
 BEHAVIORS = ("channel", "capacity", "approvals_block", "approvals_dialog", "restart", "cohort_restart",
-             "cant_continue", "cyber_switch", "usage_check")
+             "cant_continue", "cyber_switch", "usage_check", "assess")
 
 # Searches and reads that are never project work. Matched against the command and action summary.
 DEFAULT_REFUSE = [
@@ -123,6 +125,7 @@ class WatcherConfig:
     codex_cyber: ModelRotation | None = None  # [codex_cyber]: the model a Codex agent moves to after a cyber block
     usage_report_left_pct: list[int] = field(default_factory=lambda: [25, 15, 10, 5])  # [usage] report_left_pct
     usage_intro_wait_s: float = 15 * 60  # post the join line with what's known after this long
+    assess: "AssessConfig" = field(default_factory=lambda: AssessConfig())  # [assess]: second opinion on requests
     start_script: str | None = None  # [launch] start_script, e.g. "~/.bin/start-{agent}": relaunch through it
 
     def start_script_for(self, name: str) -> Path | None:
@@ -239,6 +242,8 @@ def load(watcher_path: Path, agents_path: Path | None = None) -> WatcherConfig:
         codex_rotation=rotation("codex_capacity", need_efforts=True),
         codex_cyber=rotation("codex_cyber", need_efforts=False),
         start_script=raw.get("launch", {}).get("start_script") or None,
+        assess=AssessConfig(**{k: v for k, v in raw.get("assess", {}).items()
+                               if k in ("model", "claude", "config_dir", "timeout_s")}),
         usage_report_left_pct=sorted((int(x) for x in raw.get("usage", {}).get("report_left_pct", [25, 15, 10, 5])),
                                      reverse=True),
     )

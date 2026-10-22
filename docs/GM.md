@@ -32,6 +32,11 @@ still restart or move it. Watchers say `Now watching <agent>` and `No longer wat
 
 ## Deciding a blocked action
 
+Each request also gets a one-line **second opinion** in its thread from a small model ("Looks project-related",
+"Outside the project" or "Unclear", and why). It's advisory: it never decides, and it can be wrong. You decide.
+Writes outside the project's folders (the agent's clone and worktrees, project-state, its own home, temporary
+folders) are refused by rule, like credential stores and broad searches; only the owner can override those.
+
 Reply in the event's thread with `approve` or `deny` (a short note may follow), or post
 `approve agent-watcher-a/B-0142` / `deny agent-watcher-a/B-0142` at top level.
 

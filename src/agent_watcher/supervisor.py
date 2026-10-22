@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from .actuator import Actuator, Notifier, Terminal
+from .assess import Assessor
 from .channel import Poster
 from .commands import HELP, Command, parse
 from .config import CHANNEL_SUFFIX, ModelRotation, WatcherConfig
@@ -145,6 +146,7 @@ class Supervisor:
         self.policy = policy or Policy(cfg, now)
         self.now = now
         self.refresh: Callable[[], Awaitable[None]] | None = None  # discovery scan, run before typing a decision
+        self.assessor = Assessor(cfg.assess)  # tests replace it
         self.agents: dict[str, AgentState] = {}
         self.pending: dict[str, Pending] = {}
         self.seq = 0
@@ -657,12 +659,24 @@ class Supervisor:
             head += f" Note: {clean(note, 200)}."
         p.thread_ts = await self._post_pending(p, head)
         self._save_state()  # with its thread, so a reply there still decides it after a restart
+        if self.cfg.mode("assess") != "off":
+            self._spawn(self._assess(p, a, reviewer, reason), f"assess:{p.id}")
         if pr.verdict is Verdict.REFUSE and kind == "dialog":
             await self._execute(p, approve=False)
         if pr.verdict is Verdict.GM:
             p.reminder = self._spawn(self._remind(p), f"remind:{p.id}")
         elif pr.verdict is Verdict.OWNER:
             await self.notifier.notify(f"agent-watcher: {st.name}", f"Needs your decision: {desc[:120]}")
+
+    async def _assess(self, p: Pending, a, reviewer: str, reason: str) -> None:
+        """A one-line second opinion from a small model, in the request's thread. Advisory only."""
+        text = await self.assessor(agent=p.agent, clone=str(a.clone), state=str(self.cfg.project_state_dir),
+                                   reviewer=reviewer, reason=reason, action=p.desc)
+        if not text:
+            return
+        self.act.audit(p.agent, "assess", self.cfg.mode("assess"), "ASSESS", text, p.id)
+        if self.cfg.mode("assess") == "live" and not p.resolved:
+            await self.say(p.project, f"Second opinion ({self.cfg.assess.model}, advisory): {text}", p.thread_ts)
 
     async def _post_pending(self, p: Pending, head: str | None = None) -> str | None:
         head = head or f"[{self._qualified(p.id)}] still pending for {p.agent}: {p.desc}."

@@ -640,3 +640,20 @@ async def test_gm_cannot_grant_itself_and_others_are_ignored(world):
     await settle()
     assert w.term.sent.get("claude-a") is None and w.term.sent.get("codex-a") is None
     assert "can't grant yourself" in w.chan.texts()[-1]
+
+
+async def test_request_gets_an_advisory_second_opinion_in_its_thread(world):
+    w = await world()
+    w.cfg.modes["assess"] = "live"
+    seen = {}
+
+    async def fake(**kw):
+        seen.update(kw)
+        return "Looks project-related: a reset of the project's own dev instance."
+    w.sup.assessor = fake
+    await w.sup.handle(blocked(w, "codex-a", "./sn reset dev12", reason="destructive"))
+    await settle()
+    project, text, thread = w.chan.posts[-1]
+    assert thread == "ts1" and text.startswith("Second opinion (") and "Looks project-related" in text
+    assert seen["agent"] == "codex-a" and "./sn reset dev12" in seen["action"] and seen["reason"] == "destructive"
+    assert w.term.sent.get("codex-a") is None  # advisory only: nothing typed

@@ -19,6 +19,7 @@ restart = "dry"
 cohort_restart = "dry"
 cant_continue = "dry"
 usage_check = "dry"
+assess = "off"                 # a one-line second opinion from a small model in each request's thread
 cyber_switch = "dry"
 
 # Agents of these kinds are managed even when they haven't joined a watched project (no Slack needed). Each is
@@ -53,6 +54,13 @@ report_left_pct = [25, 15, 10, 5]
 # How a restart relaunches an agent. With start_script set, an agent whose script exists (and is executable) is
 # relaunched as `<script> '<start prompt>'`; the script sets the agent's home and repo. Otherwise the watcher
 # rebuilds the command from the running process. agents.toml `launch` overrides both.
+# The second opinion on requests (mode "assess"): `claude -p` on the user's own Claude login, with no tools, MCP
+# servers, settings or hooks. Advisory only: posted in the request's thread, never typed or acted on.
+[assess]
+model = "claude-haiku-5-5"
+# claude = "claude"            # the CLI
+# config_dir = "~/.claude"     # whose login to use; default: the CLI's default (~/.claude)
+
 [launch]
 # start_script = "~/.bin/start-{agent}"
 
@@ -80,12 +88,9 @@ auto_approve = []
 # use refuse_extra to add to it. Built-ins: broad searches outside the workspace, credential stores,
 # keychain/browser profiles, sudo, other users' homes.
 refuse_extra = []
-# Only the owner may decide these.
-owner_only = [
-  "reset-prod",
-  "deploy-backend",
-  "\\bprod(uction)?\\b.*(delete|drop|wipe|reset|deploy)",
-]
+# Only the owner may decide these. Empty: the GM decides all project work, prod included; the refuse
+# rules and writes outside the project's folders are the hard limit only the owner can override.
+owner_only = []
 
 # Permission-dialog keys and the screen text that proves a dialog is showing. Verify before going live.
 [keys.claude]
