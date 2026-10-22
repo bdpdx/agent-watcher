@@ -1,0 +1,18 @@
+   Settings  Status   Config   Usage   Stats
+   Session
+   Total cost:            $0.0000
+   Total duration (API):  0s
+   Total duration (wall): 25s
+   Total code changes:    0 lines added, 0 lines removed
+   Usage:                 0 input, 0 output, 0 cache read, 0 cache write
+   Current session
+   ██████                                             12% used
+   Resets 1:09pm (UTC)
+   Current week (all models)
+   ████████████████████▌                              41% used
+   Resets Oct 23 at 11:59pm (UTC)
+   Current week (Fable)
+   ██████▌                                            13% used
+   Resets Oct 23 at 11:59pm (UTC)
+   What's contributing to your limits usage?
+   Approximate, based on local sessions on this machine — does not include other devices or claude.ai

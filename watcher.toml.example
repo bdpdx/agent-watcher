@@ -1,0 +1,99 @@
+# agent-watcher settings. Copy to watcher.toml and fill in.
+#
+# There is no agent list and no project setting. The watcher serves every #<project>__agent-watcher channel
+# its bot belongs to, and manages each running agent whose current session has joined one of those projects.
+
+project_state_dir = "~/code/project-state"
+owner_slack_id = "UXXXXXXXX"               # the human developer at this machine's console
+authorized_humans = []                     # other developers this owner authorizes to command this watcher
+state_dir = "~/.agent-watcher"
+
+# Each behavior is off, dry or live. "channel" governs posting to Slack (dry: posts go to audit.log only);
+# the rest govern keystrokes (dry: "would type X" lines in audit.log).
+[modes]
+channel = "live"
+capacity = "dry"
+approvals_block = "dry"
+approvals_dialog = "dry"
+restart = "dry"
+cohort_restart = "dry"
+cant_continue = "dry"
+usage_check = "dry"
+cyber_switch = "dry"
+
+# Agents of these kinds are managed even when they haven't joined a watched project (no Slack needed). Each is
+# named after its home: ~/.codex-g -> codex-g. Its reports go to audit.log.
+[local]
+manage = ["codex"]
+
+# On a Codex capacity error ("Selected model is at capacity", "Server overloaded"), switch through /model to
+# `model` at the effort after the current one (round-robin), then type `continue`. Labels as the menus show them.
+# confirm_key "s" applies the effort to this session only; "\r" would save it as the home's default.
+[codex_capacity]
+model = "GPT-6.1-Sol"
+efforts = ["Medium", "High", "Extra high"]
+confirm_key = "s"
+
+# On a Codex cybersecurity block (cyber_policy), switch to this model for the session, keeping the session's
+# effort (efforts = [] ; list labels to rotate instead), then ask it to continue in plain development terms. After
+# its next successful turn it switches back to the model it had (else [codex_capacity] model). Blocked again before
+# a successful turn: no second switch; in a project that's left to the GM, otherwise the owner is notified.
+[codex_cyber]
+model = "Daybreak Blue"
+efforts = []
+confirm_key = "s"
+
+# Plan usage limits. Codex: from its rollouts. Claude: session and weekly from the status line (install with
+# `agent-watcher install-statusline <home>`), per-model weeks (Fable) by reading /usage (behavior usage_check):
+# daily below 50% used, then every 6h, 2h (80%), 1h (90%), 30m (95%). One line per agent when it joins, then
+# quiet until a window has report_left_pct[0]% or less left: one post at each mark, and one when it resets.
+[usage]
+report_left_pct = [25, 15, 10, 5]
+
+[timing]
+capacity_first_delay_s = 30   # doubles on each consecutive retry
+capacity_max_tries = 5
+gm_answer_timeout_s = 900       # then the owner gets a macOS notification
+cohort_restart_every_h = 12     # only the watcher hosting the GM schedules cohort restarts
+cohort_restart_anchor = "06:00"
+detached_grace_s = 7200         # an agent whose session left its project stays restartable this long
+discovery_sweep_s = 30
+screen_poll_s = 2               # Codex screens are read this often for capacity errors
+
+[context]
+report_pct = []                 # post once when an agent's context crosses each mark, e.g. [50, 80] (off: empty)
+claude_window = 1000000
+
+[policy]
+max_approvals_per_agent_per_hour = 10
+# Regexes (case-insensitive) matched against "<tool> <command> <summary>".
+# Git confined to the agent's own clone/worktrees/project-state is always auto-approved.
+auto_approve = []
+# Never authorized; reported with the rule; only the owner can override. Replaces the built-in list if set;
+# use refuse_extra to add to it. Built-ins: broad searches outside the workspace, credential stores,
+# keychain/browser profiles, sudo, other users' homes.
+refuse_extra = []
+# Only the owner may decide these.
+owner_only = [
+  "reset-prod",
+  "deploy-backend",
+  "\\bprod(uction)?\\b.*(delete|drop|wipe|reset|deploy)",
+]
+
+# Permission-dialog keys and the screen text that proves a dialog is showing. Verify before going live.
+[keys.claude]
+allow = "1"
+deny = "\u001b"
+dialog_regex = "Do you want to (proceed|make this edit|create|run)"
+
+[keys.codex]
+allow = "y"
+deny = "\u001b"
+dialog_regex = "(Allow|Approve).*\\?"
+
+[slack]
+# This machine's watcher bot. Tokens come from these environment variables, or else from env_file
+# (SLACK_MCP_XOXB_TOKEN / SLACK_MCP_XAPP_TOKEN). A user token (xoxp) in that file is never used.
+env_file = "~/.claude-agent-watcher/slack-mcp-server.env"
+bot_token_env = "AGENT_WATCHER_SLACK_BOT_TOKEN"
+app_token_env = "AGENT_WATCHER_SLACK_APP_TOKEN"

@@ -1,0 +1,620 @@
+import asyncio
+import json
+
+import pytest
+
+from agent_watcher.actuator import Actuator
+from agent_watcher.events import E, Event, Tier
+from agent_watcher.supervisor import Status, Supervisor
+from agent_watcher.templates import T, render
+
+from .conftest import P1, P2, FakeChannel, FakeNotifier, FakeTerminal, make_cfg, record
+
+
+class World:
+    def __init__(self, tmp_path, mode="live", projects=(P1,), gms=None, agents=None):
+        self.tmp = tmp_path
+        self.cfg = make_cfg(tmp_path, mode)
+        self.term = FakeTerminal()
+        self.chan = FakeChannel(projects)
+        self.notes = FakeNotifier()
+        self.sup = Supervisor(self.cfg, self.term, Actuator(self.cfg, self.term, self.cfg.state_dir / "audit.log"),
+                              self.chan, self.notes)
+        gms = gms or {P1: "claude-a", P2: "claude-m"}
+        self.sup.gm = lambda p: gms.get(p)
+        self.records = {}
+        for name, project in (agents or {"claude-a": P1, "codex-a": P1, "codex-g": P1}).items():
+            self.records[name] = record(tmp_path, name, project)
+        self.scan()
+
+    def scan(self):
+        return self.sup.apply_discovery(list(self.records.values()))
+
+    def set(self, name, **kw):
+        """Change what the next scan sees for an agent: project=None unregisters, session= a new session."""
+        r = self.records[name]
+        project = kw.get("project", r.regs[0].project if r.regs else None)
+        self.records[name] = record(self.tmp, name, project, kw.get("session", r.session_id))
+
+
+@pytest.fixture
+def world(tmp_path):
+    async def build(**kw):
+        w = World(tmp_path, **kw)
+        await settle(3)  # let the "Now watching" posts from the initial scan land
+        w.chan.posts.clear()
+        w.chan._ts = 0
+        return w
+    return build
+
+
+async def settle(n=20):
+    for _ in range(n):
+        await asyncio.sleep(0.02)
+
+
+def msg(text, project=P1, tier=Tier.GM, sender="claude-a", thread_ts=None, is_bot=None):
+    return Event(E.MESSAGE, None, {"project": project, "text": text, "sender": sender, "user": "U" + sender,
+                                   "tier": tier, "is_bot": tier is Tier.GM if is_bot is None else is_bot,
+                                   "ts": "m1", "thread_ts": thread_ts})
+
+
+def blocked(w, agent, command, reason="risky"):
+    return Event(E.BLOCKED, agent, {"tool_name": "Bash", "tool_input": {"command": command}, "reason": reason,
+                                    "cwd": str(w.records[agent].cwd), "reviewer": "codex_auto_review"})
+
+
+def audit(cfg):
+    return [json.loads(line) for line in (cfg.state_dir / "audit.log").read_text().splitlines()]
+
+
+async def relaunch_registers(w, name, project, session="s2", after=0.15):
+    """Simulate the relaunched agent joining `project` with a new session."""
+    await asyncio.sleep(after)
+    w.set(name, project=project, session=session)
+    w.scan()
+    await w.sup._notify_waiters()
+
+
+# ---- discovery lifecycle ------------------------------------------------------------------------
+
+async def test_only_registered_sessions_in_watched_projects_are_managed(world):
+    w = await world(agents={"claude-a": P1, "codex-a": None, "codex-g": P2})
+    assert set(w.sup.agents) == {"claude-a"}
+    w.chan._projects.add(P2)
+    w.scan()
+    await settle()
+    assert set(w.sup.agents) == {"claude-a", "codex-g"} and "Now watching codex-g." in w.chan.texts(P2)
+
+
+async def test_joining_later_starts_watching(world):
+    w = await world(agents={"codex-a": None})
+    assert w.sup.agents == {}
+    w.set("codex-a", project=P1)
+    w.scan()
+    await settle()
+    assert "codex-a" in w.sup.agents and w.chan.texts(P1) == ["Now watching codex-a."]
+
+
+async def test_registration_gone_same_session_is_detached(world):
+    w = await world()
+    w.set("codex-a", project=None)
+    w.scan()
+    st = w.sup.agents["codex-a"]
+    assert st.status is Status.DETACHED
+    await w.sup.handle(Event(E.CAPACITY, "codex-a", {"text": "overloaded"}))
+    await settle()
+    assert w.chan.texts() == [] and w.term.sent.get("codex-a") is None  # no reports while detached
+    assert w.sup.request_restart("codex-a", "test") is None
+
+
+async def test_new_unregistered_session_drops_agent(world):
+    w = await world()
+    w.set("codex-a", project=None, session="s9")
+    w.scan()
+    await settle()
+    assert "codex-a" not in w.sup.agents and "a new session started" in w.chan.texts(P1)[0]
+
+
+async def test_exited_agent_dropped(world):
+    w = await world()
+    del w.records["codex-g"]
+    w.scan()
+    await settle()
+    assert "codex-g" not in w.sup.agents and "the agent exited" in w.chan.texts(P1)[0]
+
+
+async def test_detached_grace_expires(world):
+    w = await world()
+    w.cfg.timing.detached_grace_s = 0
+    w.set("codex-a", project=None)
+    w.scan()
+    await w.sup.tick()
+    await settle()
+    assert "codex-a" not in w.sup.agents
+
+
+async def test_two_processes_on_one_home_warn(world):
+    w = await world()
+    dup = record(w.tmp, "codex-a", P1, session="s7", tab="TAB-other", home=w.records["codex-a"].home)
+    w.records["codex-a-dup"] = dup
+    w.scan()
+    await settle()
+    assert any("1:1:1 violation" in t for t in w.chan.texts(P1)) and w.notes.notes
+
+
+async def test_session_in_two_projects_warns(world):
+    w = await world(projects=(P1, P2))
+    r = w.records["codex-g"]
+    r.regs.append(type(r.regs[0])(P2, "codex-g", r.session_id))
+    w.scan()
+    await settle()
+    assert any("registered in" in t for t in w.chan.texts())
+
+
+# ---- per-project scoping ------------------------------------------------------------------------
+
+async def test_reports_go_to_the_agents_project(world):
+    w = await world(projects=(P1, P2), agents={"claude-a": P1, "codex-m": P2})
+    await w.sup.handle(Event(E.CAPACITY, "codex-m", {"text": "at capacity"}))
+    await settle()
+    assert w.chan.texts(P1) == [] and "codex-m: turn stopped" in w.chan.texts(P2)[0]
+
+
+async def test_gm_of_one_project_cannot_command_another(world):
+    w = await world(projects=(P1, P2), agents={"claude-a": P1, "codex-m": P2})
+    await w.sup.handle(msg("restart codex-m", project=P1, sender="claude-a"))
+    await w.sup.handle(msg("status codex-m", project=P1, sender="claude-a"))
+    await settle()
+    assert w.chan.texts() == [] and w.term.sent.get("codex-m") is None
+
+
+async def test_owner_can_command_any_of_our_agents(world):
+    w = await world(projects=(P1, P2), agents={"claude-a": P1, "codex-m": P2})
+    await w.sup.handle(Event(E.IDLE, "codex-m", source="rollout"))
+    await w.sup.handle(msg("continue codex-m", project=P1, tier=Tier.OWNER, sender="owner", is_bot=False))
+    await settle()
+    assert w.term.lines("codex-m") == ["continue"]
+
+
+async def test_status_per_project(world):
+    w = await world(projects=(P1, P2), agents={"claude-a": P1, "codex-a": P1, "codex-m": P2})
+    await w.sup.handle(msg("status", project=P2, sender="claude-m"))
+    await settle()
+    text = w.chan.texts(P2)[0]
+    assert "codex-m" in text and "codex-a" not in text
+
+
+# ---- approvals --------------------------------------------------------------------------------
+
+async def test_own_clone_git_auto_approved_not_posted(world):
+    w = await world()
+    await w.sup.handle(Event(E.IDLE, "codex-a", source="rollout"))
+    await w.sup.handle(blocked(w, "codex-a", "git push -f origin fix/x"))
+    await settle()
+    assert w.term.lines("codex-a") == [render(T.AUTH, ["the command `git push -f origin fix/x`"])]
+    assert w.chan.texts(P1) == []
+    assert [r["action"] for r in audit(w.cfg) if r["behavior"] == "approvals_block"][0] == "POLICY_approve"
+
+
+async def test_gm_approves_in_thread(world):
+    w = await world()
+    await w.sup.handle(Event(E.IDLE, "codex-a", source="rollout"))
+    await w.sup.handle(blocked(w, "codex-a", "./sn reset dev12 --wipe", "irreversible deletion"))
+    await settle()
+    assert w.term.sent.get("codex-a") is None and "Reply `approve`" in w.chan.texts(P1)[0]
+    await w.sup.handle(msg("approve", thread_ts="ts1"))
+    await settle()
+    assert w.term.lines("codex-a") == [render(T.AUTH, ["the command `./sn reset dev12 --wipe`"])]
+
+
+async def test_approval_after_restart_types_nothing(world):
+    w = await world()
+    await w.sup.handle(Event(E.IDLE, "codex-a", source="rollout"))
+    await w.sup.handle(blocked(w, "codex-a", "./sn reset dev12 --wipe"))
+    await settle()
+    w.set("codex-a", session="s2")
+    w.scan()
+    await settle()
+    assert any("Closed: it restarted" in t for t in w.chan.texts(P1))
+    await w.sup.handle(msg("approve", thread_ts="ts1"))
+    await settle()
+    assert w.term.sent.get("codex-a") is None and "Already closed" in w.chan.texts(P1)[-1]
+
+
+async def test_approval_rescans_before_typing(world):
+    """The restart isn't discovered yet when the approval arrives: the scan run before typing finds it."""
+    w = await world()
+    await w.sup.handle(Event(E.IDLE, "codex-a", source="rollout"))
+    await w.sup.handle(blocked(w, "codex-a", "./sn reset dev12 --wipe"))
+    await settle()
+    w.set("codex-a", session="s2")
+
+    async def refresh():
+        w.scan()
+    w.sup.refresh = refresh
+    await w.sup.handle(msg("approve", thread_ts="ts1"))
+    await settle()
+    assert w.term.sent.get("codex-a") is None
+    assert any("codex-a has restarted since this was posted" in t for t in w.chan.texts(P1))
+
+
+async def test_queued_authorization_dropped_on_restart(world):
+    w = await world()
+    await w.sup.handle(Event(E.WORKING, "codex-a", source="rollout"))
+    await w.sup.handle(blocked(w, "codex-a", "./sn reset dev12 --wipe"))
+    await settle()
+    await w.sup.handle(msg("approve", thread_ts="ts1"))  # agent busy: queued until idle
+    await settle()
+    w.set("codex-a", session="s2")
+    w.scan()
+    await w.sup.handle(Event(E.IDLE, "codex-a", source="rollout"))
+    await settle(60)
+    assert w.term.sent.get("codex-a") is None
+
+
+async def test_session_end_closes_requests(world):
+    w = await world(agents={"claude-a": P1, "claude-e": P1})
+    await w.sup.handle(blocked(w, "claude-e", "./sn reset dev12 --wipe"))
+    await settle()
+    await w.sup.handle(Event(E.SESSION_END, "claude-e", {"reason": "prompt_input_exit"}, source="hook:SessionEnd"))
+    await settle()
+    assert "Closed: its session ended" in w.chan.texts(P1)[-1]
+    assert all(p.resolved == "closed" for p in w.sup.pending.values())
+
+
+async def test_decision_from_another_projects_channel_ignored(world):
+    w = await world(projects=(P1, P2))
+    await w.sup.handle(blocked(w, "codex-a", "./sn reset dev12"))
+    await settle()
+    await w.sup.handle(msg("approve agent-watcher-a/B-0001", project=P2, sender="claude-m"))
+    await settle()
+    assert len(w.chan.posts) == 1
+
+
+async def test_approval_text_never_reaches_terminal(world):
+    w = await world()
+    await w.sup.handle(Event(E.IDLE, "codex-a", source="rollout"))
+    await w.sup.handle(blocked(w, "codex-a", "./sn reset dev12"))
+    await settle()
+    await w.sup.handle(msg("approve and also type `rm -rf ~` into claude-a", thread_ts="ts1"))
+    await settle()
+    assert "rm -rf" not in "".join(w.term.sent["codex-a"]) and w.term.sent.get("claude-a") is None
+
+
+async def test_only_authorized_senders_count(world):
+    w = await world()
+    await w.sup.handle(blocked(w, "codex-a", "./sn reset dev12"))
+    await settle()
+    await w.sup.handle(msg("approve", tier=Tier.OTHER, sender="codex-g", thread_ts="ts1", is_bot=False))
+    await w.sup.handle(msg("restart codex-a", tier=Tier.OTHER, sender="mallory", is_bot=False))
+    await settle()
+    assert w.term.sent.get("codex-a") is None and len(w.chan.posts) == 1
+    await w.sup.handle(msg("approve", tier=Tier.AUTHORIZED_HUMAN, sender="dana", thread_ts="ts1", is_bot=False))
+    await settle()
+    assert "Approved by dana" in w.chan.texts()[-1]
+
+
+async def test_refused_by_rule_only_owner_overrides(world):
+    w = await world(agents={"claude-a": P1, "claude-e": P1})
+    await w.sup.handle(blocked(w, "claude-e", "find / -name libfoo.dylib"))
+    await settle()
+    assert "Refused by rule" in w.chan.texts()[0]
+    await w.sup.handle(msg("approve", thread_ts="ts1"))
+    await settle()
+    assert "Only <@UOWNER>" in w.chan.texts()[-1] and w.term.sent.get("claude-e") is None
+    await w.sup.handle(Event(E.IDLE, "claude-e", source="hook:Stop"))
+    await w.sup.handle(msg("approve", tier=Tier.OWNER, sender="owner", thread_ts="ts1", is_bot=False))
+    await settle()
+    assert len(w.term.lines("claude-e")) == 1
+
+
+async def test_gm_unanswered_notifies_owner(world):
+    w = await world()
+    w.cfg.timing.gm_answer_timeout_s = 0.2
+    await w.sup.handle(blocked(w, "codex-a", "./sn reset dev12"))
+    await asyncio.sleep(0.4)
+    assert w.notes.notes and "No answer" in w.chan.texts()[-1]
+
+
+async def test_dialog_pressed_only_when_visible(world):
+    w = await world(agents={"claude-a": P1, "claude-e": P1})
+    await w.sup.handle(Event(E.DIALOG, "claude-e", {"tool_name": "Read", "tool_input": {"file_path": "/etc/hosts"}}))
+    await settle()
+    w.term.screens["claude-e"] = "Read file\n Do you want to proceed?\n ❯ 1. Yes\n   2. No"
+    await w.sup.handle(msg("approve", thread_ts="ts1"))
+    await settle(10)
+    assert w.term.sent["claude-e"] == ["1"]
+
+
+async def test_dialog_found_on_a_real_screen_with_nuls(world):
+    w = await world(agents={"claude-a": P1, "claude-e": P1})
+    await w.sup.handle(Event(E.DIALOG, "claude-e", {"tool_name": "Bash", "tool_input": {"command": "rmdir $WT/$d"}}))
+    await settle()
+    w.term.screens["claude-e"] = ("\x00│\x00rmdir\x00$WT/$d\n\x00Do\x00you\x00want\x00to\x00proceed?\n"
+                                  "\x00❯\x001.\x00Yes\n\x00\x00\x002.\x00No\n\x00Esc\x00to\x00cancel")
+    await w.sup.handle(msg("approve", thread_ts="ts1"))
+    await settle(10)
+    assert w.term.sent["claude-e"] == ["1"] and "pressed Allow" in w.chan.texts()[-1]
+
+
+async def test_gm_own_requests_are_only_audited(world):
+    w = await world()  # claude-a is P1's GM; its prompts reach the owner through its own Slack approvals
+    await w.sup.handle(blocked(w, "claude-a", "./sn reset dev12"))
+    await w.sup.handle(Event(E.DIALOG, "claude-a", {"tool_name": "Read", "tool_input": {"file_path": "/etc/hosts"}}))
+    await settle()
+    assert not w.chan.posts and not w.sup.pending and not w.notes.notes and w.term.sent.get("claude-a") is None
+    assert [a["action"] for a in audit(w.cfg)][-2:] == ["GM_OWN", "GM_OWN"]
+
+
+# ---- the GM, from gm.json or a `gm <agent>` post ----------------------------------------------------
+
+def real_gm(w, file_gm):
+    """Use the supervisor's own GM logic, with gm.json naming `file_gm` (a one-item list, so tests can change it)."""
+    w.sup.gm = Supervisor.gm.__get__(w.sup)
+    w.sup._gm_file = lambda p: file_gm[0]
+
+
+async def test_gm_post_by_the_agent_itself_overrides_gm_json(world):
+    w = await world(agents={"claude-a": P1, "claude-e": P1})
+    file_gm = ["claude-a"]
+    real_gm(w, file_gm)
+    await w.sup.handle(msg("gm claude-e", tier=Tier.OTHER, sender="claude-e", is_bot=True))
+    await settle()
+    assert w.sup.gm(P1) == "claude-e" and (P1, "claude-e") in w.chan.invites
+    assert "The GM is now claude-e." in w.chan.texts()[-1]
+    file_gm[0] = "claude-g"  # a later change to gm.json wins again
+    assert w.sup.gm(P1) == "claude-g"
+
+
+async def test_gm_post_handover_and_owner(world):
+    w = await world(agents={"claude-a": P1, "claude-e": P1})
+    real_gm(w, ["claude-a"])
+    await w.sup.handle(msg("gm claude-e", tier=Tier.GM, sender="claude-a"))
+    assert w.sup.gm(P1) == "claude-e"
+    await w.sup.handle(msg("gm claude-a", tier=Tier.OWNER, sender="owner", is_bot=False))
+    assert w.sup.gm(P1) == "claude-a"
+
+
+async def test_gm_post_refused_from_others(world):
+    w = await world(agents={"claude-a": P1, "claude-e": P1})
+    real_gm(w, ["claude-a"])
+    await w.sup.handle(msg("gm claude-e", tier=Tier.OTHER, sender="codex-g", is_bot=True))  # not itself
+    await w.sup.handle(msg("gm mallory", tier=Tier.OTHER, sender="mallory", is_bot=True))  # not in the cohort
+    await w.sup.handle(msg("gm claude-e", tier=Tier.OTHER, sender="claude-e", is_bot=True, thread_ts="t1"))
+    await settle()
+    assert w.sup.gm(P1) == "claude-a" and not w.chan.posts
+
+
+# ---- restarts, moves, cohorts ----------------------------------------------------------------
+
+async def test_restart_completes_when_new_session_registers(world):
+    w = await world()
+    await w.sup.handle(Event(E.IDLE, "codex-a", source="rollout"))
+    await w.sup.handle(msg("restart codex-a"))
+    await relaunch_registers(w, "codex-a", P1)
+    await settle(30)
+    lines = w.term.lines("codex-a")
+    assert lines[0] == "/exit" and lines[1].endswith("'start project 2026-10-06-ui-fixes'")
+    assert "codex-a restarted." in w.chan.texts(P1)
+
+
+async def test_restart_that_never_rejoins_is_reported(world):
+    w = await world()
+    await w.sup.handle(Event(E.IDLE, "codex-a", source="rollout"))
+    await w.sup.handle(msg("restart codex-a"))
+    await settle(60)
+    assert any("hasn't joined" in t for t in w.chan.texts(P1))
+
+
+async def test_move_between_watched_projects(world):
+    w = await world(projects=(P1, P2))
+    await w.sup.handle(Event(E.IDLE, "codex-g", source="rollout"))
+    await w.sup.handle(msg(f"move codex-g to <#C9|{P2}>"))
+    await relaunch_registers(w, "codex-g", P2)
+    await settle(30)
+    assert w.term.lines("codex-g")[1].endswith(f"'start project {P2}'")
+    assert w.sup.agents["codex-g"].project == P2
+    assert any("moving here" in t for t in w.chan.texts(P2)) and "codex-g moved to " + P2 + "." in w.chan.texts(P1)
+
+
+async def test_move_to_unwatched_project_refused(world):
+    w = await world()
+    await w.sup.handle(msg(f"move codex-g {P2}"))
+    await settle()
+    assert "no #2026-10-08-ui-matrix__agent-watcher here" in w.chan.texts(P1)[0]
+    assert w.term.sent.get("codex-g") is None
+
+
+async def test_cohort_gm_host_flow(world):
+    w = await world()
+    for a in ("claude-a", "codex-a", "codex-g"):
+        await w.sup.handle(Event(E.IDLE, a, source="hook:Stop"))
+    await w.sup.handle(msg("restart cohort", tier=Tier.OWNER, sender="owner", is_bot=False))
+    await settle()
+    assert w.term.lines("claude-a") == [render(T.SYNC_COHORT)]
+    await w.sup.handle(msg("agent-watcher-m online: watching codex-m", tier=Tier.OTHER, sender="agent-watcher-m",
+                           is_bot=True))
+    await w.sup.handle(msg("cohort ready"))
+    for a in ("codex-a", "codex-g"):
+        await relaunch_registers(w, a, P1, after=0.05)
+    await settle(30)
+    assert any(t.startswith("cohort done: agent-watcher-a restarted codex-a, codex-g") for t in w.chan.texts(P1))
+    assert len(w.term.lines("claude-a")) == 1  # the GM waits for agent-watcher-m
+    await w.sup.handle(msg("cohort done: agent-watcher-m restarted codex-m", tier=Tier.OTHER,
+                           sender="agent-watcher-m", is_bot=True))
+    await settle(20)
+    assert w.term.lines("claude-a")[1] == "/exit"
+
+
+async def test_cohort_non_host_restarts_local_agents_only(world):
+    w = await world(gms={P1: "codex-m"})
+    await w.sup.handle(msg("cohort ready", sender="codex-m"))
+    for a in ("claude-a", "codex-a", "codex-g"):
+        await relaunch_registers(w, a, P1, after=0.03)
+    await settle(40)
+    for a in ("claude-a", "codex-a", "codex-g"):
+        assert w.term.lines(a)[0] == "/exit"
+    assert not any("Restarting the GM" in t for t in w.chan.texts())
+
+
+async def test_cohort_schedule_only_where_gm_runs(world):
+    w = await world(projects=(P1, P2), agents={"claude-a": P1, "codex-m": P2})
+    assert w.sup.hosts_gm(P1) and not w.sup.hosts_gm(P2)
+
+
+# ---- reports --------------------------------------------------------------------------------
+
+async def test_compactions_are_tracked_not_posted(world):
+    w = await world()
+    await w.sup.handle(Event(E.COMPACTION, "claude-a", {"count": 0, "baseline": True, "started_at": 0}))
+    for i in (1, 2):
+        await w.sup.handle(Event(E.COMPACTION, "claude-a", {"count": i, "pre": 968_156, "post": 24_924}))
+    await settle()
+    assert w.chan.texts(P1) == []
+    assert w.sup.agents["claude-a"].compactions == 2 and w.sup.agents["claude-a"].compaction_floor == 2
+
+
+def compaction_log(w):
+    return [json.loads(line) for line in w.sup.compaction_log.read_text().splitlines()]
+
+
+async def test_compactions_logged_and_summed_per_cycle(world):
+    w = await world()
+    clock = [w.sup.now()]
+    w.sup.now = lambda: clock[0]
+    w.sup._check_compaction_cycle()
+    end = w.sup.cycle_end
+    await w.sup.handle(Event(E.COMPACTION, "claude-a", {"count": 1, "pre": 968_156, "post": 24_924}))
+    await w.sup.handle(Event(E.COMPACTION, "codex-a", {"count": 4, "pre": 400_000, "post": None}))
+    await w.sup.handle(Event(E.COMPACTION, "codex-a", {"count": 5, "pre": 400_000, "post": None}))
+    clock[0] = end + 1
+    w.sup._check_compaction_cycle()
+    *events, summary = compaction_log(w)
+    assert [e["agent"] for e in events] == ["claude-a", "codex-a", "codex-a"] and events[0]["kind"] == "claude"
+    assert summary["by_kind"] == {"claude": 1, "codex": 2} and summary["by_agent"] == {"claude-a": 1, "codex-a": 2}
+    assert w.sup.cycle_compactions == {} and w.sup.cycle_start == end and w.sup.cycle_end > end
+    assert w.chan.texts(P1) == []
+
+
+async def test_compactions_counted_while_detached(world):
+    w = await world()
+    w.sup.agents["codex-a"].status = Status.DETACHED
+    await w.sup.handle(Event(E.COMPACTION, "codex-a", {"count": 2, "pre": 400_000, "post": None}))
+    assert w.sup.cycle_compactions == {"codex-a": 1} and w.sup.agents["codex-a"].compactions == 2
+
+
+async def test_context_reports_thresholds_once(world):
+    w = await world()
+    for tokens in (300_000, 510_000, 600_000, 820_000, 830_000):
+        await w.sup.handle(Event(E.CONTEXT, "codex-a", {"tokens": tokens, "window": 1_000_000}))
+    await settle()
+    assert [t.split(" (")[0] for t in w.chan.texts(P1)] == ["codex-a context at 51%", "codex-a context at 82%"]
+
+
+async def test_session_refusal_recovers(world):
+    w = await world()
+    await w.sup.handle(Event(E.SESSION_REFUSAL, "claude-a", {"text": "flagged this session"}))
+    await relaunch_registers(w, "claude-a", P1)
+    await settle(30)
+    lines = w.term.lines("claude-a")
+    assert lines[0] == "/exit" and lines[1] == "clear" and "after a safety block" in lines[2]
+
+
+async def test_gm_change_invites_new_gm(world):
+    w = await world()
+    w.sup.last_gm = {P1: "claude-a"}
+    w.sup.gm = lambda p: "codex-g"
+    await w.sup._check_gm_change(P1)
+    assert w.chan.invites == [(P1, "codex-g")] and "The GM is now codex-g" in w.chan.texts(P1)[-1]
+
+
+async def test_channel_ready_hello_lists_project_agents(world):
+    w = await world(projects=(P1, P2), agents={"claude-a": P1})
+    await w.sup._on_channel_ready(P2)
+    assert w.chan.texts(P2) == ["agent-watcher-a online: watching none"]
+
+
+async def test_dry_mode_types_nothing(world):
+    w = await world(mode="dry")
+    await w.sup.handle(Event(E.CAPACITY, "codex-a", {"text": "overloaded"}))
+    await w.sup.handle(msg("restart codex-a"))
+    await settle()
+    assert w.term.sent == {}
+    assert {"CONTINUE", "RESTART"} <= {r["action"] for r in audit(w.cfg)}
+
+
+# ---- open requests survive a watcher restart ---------------------------------------------------------
+
+def restarted(w):
+    """A new Supervisor on the same state dir, as after a watcher restart, with the same agents discovered."""
+    w.sup = Supervisor(w.cfg, w.term, Actuator(w.cfg, w.term, w.cfg.state_dir / "audit.log"), w.chan, w.notes)
+    w.sup.gm = lambda p: "claude-a"
+    w.scan()
+    return w.sup
+
+
+async def test_open_request_survives_a_watcher_restart(world):
+    w = await world()
+    await w.sup.handle(blocked(w, "codex-a", "./sn reset dev12", reason="risky."))
+    await settle()
+    assert "Reason: risky. Reply" in w.chan.texts()[0]  # one period, not two
+    sup = restarted(w)
+    assert list(sup.pending) == ["B-0001"] and sup.pending["B-0001"].thread_ts == "ts1"
+    await sup.handle(Event(E.IDLE, "codex-a", source="rollout"))
+    await sup.handle(msg("approve", thread_ts="ts1"))
+    await settle()
+    assert "./sn reset dev12" in "".join(w.term.lines("codex-a"))
+
+
+async def test_saved_request_closed_when_the_agent_restarted_meanwhile(world):
+    w = await world()
+    await w.sup.handle(blocked(w, "codex-a", "./sn reset dev12"))
+    await settle()
+    w.set("codex-a", session="s2")  # the agent restarted while the watcher was down
+    sup = restarted(w)
+    await settle()
+    assert sup.pending["B-0001"].resolved == "closed" and any("Closed: it restarted" in t for t in w.chan.texts())
+
+
+def test_terminal_input_is_described_plainly():
+    from agent_watcher.templates import describe_action
+    assert describe_action("write_stdin", {"chars": "release\n", "session_id": 33787, "tty": True}) == \
+        "typing `release` into its running terminal command (session 33787)"
+
+
+async def test_block_repeated_after_approval_is_reported_in_its_thread(world):
+    w = await world()
+    await w.sup.handle(blocked(w, "codex-a", "./sn reset dev12"))
+    await settle()
+    await w.sup.handle(Event(E.IDLE, "codex-a", source="rollout"))
+    await w.sup.handle(msg("approve", thread_ts="ts1"))
+    await settle()
+    posts = len(w.chan.posts)
+    await w.sup.handle(blocked(w, "codex-a", "./sn reset dev12", reason="still risky"))  # the retry is refused
+    await settle()
+    assert len(w.sup.pending) == 1 and len(w.chan.posts) == posts + 1
+    project, text, thread = w.chan.posts[-1]
+    assert thread == "ts1" and "blocked again after the authorization" in text and "still risky" in text
+    assert audit(w.cfg)[-1]["action"] == "REFUSED_AFTER_AUTH"
+
+
+async def test_gm_grant_is_typed_into_the_agent(world):
+    w = await world()
+    await w.sup.handle(Event(E.IDLE, "codex-a", source="rollout"))
+    await w.sup.handle(msg("grant codex-a authorization for the dev12 wipe, once"))
+    await settle()
+    [line] = w.term.lines("codex-a")
+    assert line.startswith("claude-a, the project's GM, has authorized this task for you: the dev12 wipe, once.")
+    assert "covers only that task" in line and "Granted to codex-a" in w.chan.texts()[-1]
+    assert audit(w.cfg)[-1]["action"] == "GRANT"
+
+
+async def test_gm_cannot_grant_itself_and_others_are_ignored(world):
+    w = await world()
+    await w.sup.handle(msg("grant claude-a authorization for anything"))
+    await w.sup.handle(msg("grant codex-a authorization for anything", tier=Tier.OTHER, sender="codex-g",
+                           is_bot=False))
+    await settle()
+    assert w.term.sent.get("claude-a") is None and w.term.sent.get("codex-a") is None
+    assert "can't grant yourself" in w.chan.texts()[-1]

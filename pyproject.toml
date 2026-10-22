@@ -1,0 +1,27 @@
+[project]
+name = "agent-watcher"
+version = "0.1.0"
+description = "Process helper that supervises CLI coding agents running in iTerm2"
+requires-python = ">=3.12"
+dependencies = [
+    "iterm2>=2.30",
+    "slack_bolt>=1.30",
+    "pydantic>=2.14",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=9", "pytest-asyncio>=1.4"]
+
+[project.scripts]
+agent-watcher = "agent_watcher.cli:main"
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

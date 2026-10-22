@@ -1,0 +1,15 @@
+# Optional per-agent overrides, keyed by the agent's bot name. Agents are discovered automatically;
+# list one here only to change how it is relaunched or which directories count as its own.
+#
+#   launch          shell command typed at the tab's shell to relaunch it; {prompt} is replaced with the
+#                   shell-quoted start prompt. Default: rebuilt from the running process (cwd, home, flags).
+#   pre_launch      shell commands typed before relaunching (e.g. "clear").
+#   worktree_roots  extra directories where git counts as the agent's own clone.
+
+[agents.claude-a]
+pre_launch = ["clear"]
+worktree_roots = ["~/code/worktrees"]
+
+[agents.codex-a]
+pre_launch = ["clear"]
+worktree_roots = ["~/code/worktrees-codex"]
