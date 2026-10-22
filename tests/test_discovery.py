@@ -93,3 +93,21 @@ def test_unregistered_session_has_no_regs(tmp_path):
                   "env": {"CODEX_HOME": str(home), "ITERM_SESSION_ID": "w0t3p0:G3"}}}
     recs = Discovery(runner(procs)).scan()
     assert recs[0].regs == [] and recs[0].session_id is None
+
+
+def test_start_script_is_used_to_relaunch_when_present(tmp_path):
+    from .conftest import make_cfg, record
+    cfg = make_cfg(tmp_path)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    cfg.start_script = str(bin_dir / "start-{agent}")
+    r = record(tmp_path, "codex-g", None)
+    script = bin_dir / "start-codex-g"
+    script.write_text("#!/bin/bash\n")
+    script.chmod(0o755)
+    a = cfg.agent_config("codex-g", "codex", r.home, r.cwd, r.launch_command())
+    assert a.launch == f"{script} {{prompt}}"
+    from agent_watcher.templates import launch_command
+    assert launch_command(a.launch, "demo-project") == f"{script} 'join project demo-project'"
+    b = cfg.agent_config("codex-k", "codex", r.home, r.cwd, r.launch_command())  # no script: rebuilt command
+    assert b.launch == r.launch_command()

@@ -31,7 +31,7 @@ def test_templates_reject_params_and_bad_project():
         render(T.CONTINUE, ["anything"])
     with pytest.raises(ValueError):
         launch_command("claude {prompt}", "x; rm -rf ~")
-    assert launch_command("claude {prompt}", "2026-10-06-ui-fixes") == "claude 'start project 2026-10-06-ui-fixes'"
+    assert launch_command("claude {prompt}", "2026-10-06-ui-fixes") == "claude 'join project 2026-10-06-ui-fixes'"
 
 
 def test_stop_failure_classification():

@@ -22,9 +22,9 @@ usage_check = "dry"
 cyber_switch = "dry"
 
 # Agents of these kinds are managed even when they haven't joined a watched project (no Slack needed). Each is
-# named after its home: ~/.codex-g -> codex-g. Its reports go to audit.log.
+# named after its home: ~/.codex-g -> codex-g. Its reports go to audit.log. Off by default (e.g. ["codex"]).
 [local]
-manage = ["codex"]
+manage = []
 
 # On a Codex capacity error ("Selected model is at capacity", "Server overloaded"), switch through /model to
 # `model` at the effort after the current one (round-robin), then type `continue`. Labels as the menus show them.
@@ -50,11 +50,18 @@ confirm_key = "s"
 [usage]
 report_left_pct = [25, 15, 10, 5]
 
+# How a restart relaunches an agent. With start_script set, an agent whose script exists (and is executable) is
+# relaunched as `<script> '<start prompt>'`; the script sets the agent's home and repo. Otherwise the watcher
+# rebuilds the command from the running process. agents.toml `launch` overrides both.
+[launch]
+# start_script = "~/.bin/start-{agent}"
+
 [timing]
 capacity_first_delay_s = 30   # doubles on each consecutive retry
 capacity_max_tries = 5
 gm_answer_timeout_s = 900       # then the owner gets a macOS notification
-cohort_restart_every_h = 12     # only the watcher hosting the GM schedules cohort restarts
+cohort_restart_scheduled = false  # true: the watcher hosting the GM asks it for a cohort restart on this schedule
+cohort_restart_every_h = 12     # the schedule; also the period of the compaction counts
 cohort_restart_anchor = "06:00"
 detached_grace_s = 7200         # an agent whose session left its project stays restartable this long
 discovery_sweep_s = 30

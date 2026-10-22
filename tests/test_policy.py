@@ -7,7 +7,7 @@ def ev(cfg, agent, command, cwd=None):
 
 
 def test_git_in_own_clone_is_approved(cfg):
-    assert ev(cfg, "claude-a", "git push --force-with-lease origin fix/ui").verdict is Verdict.APPROVE
+    assert ev(cfg, "claude-a", "git commit -qam wip && git rebase origin/main").verdict is Verdict.APPROVE
     assert ev(cfg, "claude-a", "git branch -D old && git worktree prune").verdict is Verdict.APPROVE
 
 
@@ -18,8 +18,20 @@ def test_codex_wrapped_git_in_own_clone(cfg):
     assert r.verdict is Verdict.APPROVE
 
 
-def test_git_in_project_state_is_approved(cfg):
-    assert ev(cfg, "codex-a", f"git -C {cfg.project_state_dir} push origin main").verdict is Verdict.APPROVE
+def test_git_in_project_state_goes_to_the_gm(cfg):
+    """project-state is shared and has its own publishing rules (fast-forward only), which the reviewer knows."""
+    r = ev(cfg, "codex-a", "git merge --no-edit origin/main", cwd=cfg.project_state_dir)
+    assert r.verdict is Verdict.GM and "project-state" in r.notes[0]
+
+
+def test_git_push_always_goes_to_the_gm(cfg):
+    """A push publishes to a shared remote, where project rules (fast-forward only, reviews) apply."""
+    for cmd in ("git push --force-with-lease origin fix/ui",
+                f"git -C {cfg.project_state_dir} push origin main",
+                "git fetch origin main && git merge --no-edit origin/main && git push origin main"):
+        r = ev(cfg, "claude-a" if "fix/ui" in cmd else "codex-a",
+               cmd if "project_state" in cmd or "fix/ui" in cmd else f"cd {cfg.project_state_dir} && {cmd}")
+        assert r.verdict is Verdict.GM and "git push" in r.notes[0], cmd
 
 
 def test_git_in_another_clone_goes_to_gm_with_note(cfg):

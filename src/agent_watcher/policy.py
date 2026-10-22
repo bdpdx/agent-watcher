@@ -1,7 +1,8 @@
 """Code-level approval rules, evaluated before anything goes to the GM.
 
 Outcomes:
-  APPROVE - authorize at once and report (git confined to the agent's own clone, `auto_approve` patterns)
+  APPROVE - authorize at once and report (git confined to the agent's own clone, except `git push`; never
+            git in project-state; `auto_approve` patterns)
   REFUSE  - never authorize; report with the rule (`refuse` patterns). Only the owner can override.
   OWNER   - only the owner may decide (`owner_only` patterns)
   GM      - ask the GM in the agent-watcher channel (everything else)
@@ -37,6 +38,9 @@ class PolicyResult:
     notes: list[str] = field(default_factory=list)  # facts for the decider
 
 
+# `git push` publishes to a shared remote (project-state main, a parent repo's main), where the project's own rules
+# (fast-forward only, reviewed merges) apply; it is never auto-approved.
+_GIT_PUSH = re.compile(r"\bgit\b[^;&|\n]*\spush\b")
 _SPLIT = re.compile(r"\s*(?:&&|\|\||;|\n|\|)\s*")
 _ENV_ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _READ_ONLY_HELPERS = {"echo", "printf", "true", "pwd", "head", "tail", "cat", "wc", "sort", "uniq", "grep", "sed",
@@ -130,14 +134,21 @@ class Policy:
         targets = git_targets(cmd, base) if cmd else None
         if targets is not None:
             shared = self.cfg.project_state_dir.resolve()
-            foreign, unknown = [], []
+            foreign, unknown, in_shared = [], [], False
             for t in targets:
                 r = t.resolve()
-                if agent.owns_path(r) or r == shared or shared in r.parents:
+                if r == shared or shared in r.parents:
+                    in_shared = True  # shared, with its own publishing rules (e.g. fast-forward only)
+                    continue
+                if agent.owns_path(r):
                     continue
                 other = self._owner_of(r)
                 (foreign if other else unknown).append(f"{r} ({other.name})" if other else str(r))
-            if not foreign and not unknown:
+            if _GIT_PUSH.search(cmd):
+                notes.append("git push publishes to a shared remote; the project's push rules apply")
+            elif in_shared:
+                notes.append("git in project-state, which is shared; its own rules (e.g. fast-forward only) apply")
+            elif not foreign and not unknown:
                 auto = PolicyResult(Verdict.APPROVE, "git in own clone")
             elif foreign:
                 notes.append(f"git in another agent's clone: {', '.join(foreign)}")

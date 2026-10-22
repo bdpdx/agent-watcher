@@ -21,6 +21,8 @@ class T(str, Enum):
     SYNC_COHORT = "SYNC_COHORT"
     SYNC_CAREFUL = "SYNC_CAREFUL"
     EXIT = "EXIT"
+    QUIT = "QUIT"
+    STOP_BACKGROUND = "STOP_BACKGROUND"
     MODEL_MENU = "MODEL_MENU"
     CONTINUE_CYBER = "CONTINUE_CYBER"
     USAGE_SCREEN = "USAGE_SCREEN"
@@ -37,6 +39,8 @@ TEXT: dict[T, str] = {
         "and be careful with the wording in your handoff."
     ),
     T.EXIT: "/exit",
+    T.QUIT: "/quit",
+    T.STOP_BACKGROUND: "/stop",  # Codex: stop its background terminals before quitting
     T.MODEL_MENU: "/model",  # Codex; the menus are then navigated with arrows, Enter and Esc
     T.CONTINUE_CYBER: (
         "Your last turn was stopped by the cybersecurity filter. Continue your work, and describe it in plain "
@@ -46,12 +50,12 @@ TEXT: dict[T, str] = {
 }
 
 # Prompts passed on the agent's command line at launch.
-START_PROMPT = "start project {project}"
+START_PROMPT = "join project {project}"
 RECOVERY_PROMPT = (
     "Your previous session was closed after a safety block. Read your HANDOFF.md and check your clone's "
     "git state; the handoff may be stale. Be careful with wording around whatever was blocked. Tell the GM "
     "you were restarted after a cyber block and may be out of sync, and follow its direction. Then "
-    "start project {project}."
+    "join project {project}."
 )
 
 MAX_ACTION_CHARS = 600

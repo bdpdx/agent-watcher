@@ -271,8 +271,18 @@ class Supervisor:
         return True
 
     async def _wait_idle(self, agent: str, timeout: float) -> bool:
+        """Until the agent is idle: from its hooks and rollout, or (e.g. right after a watcher restart, before any
+        turn has ended) from its screen."""
         st = self.agents[agent]
-        return await self.wait_until(lambda: st.idle, timeout)
+        deadline = self.now() + timeout
+        while not st.idle:
+            if await self.act.screen_idle(agent):
+                st.idle = True
+                break
+            if self.now() >= deadline:
+                return False
+            await self.wait_until(lambda: st.idle, min(2.0, max(0.0, deadline - self.now())))
+        return True
 
     def _spawn(self, coro, name: str) -> asyncio.Task:
         task = asyncio.create_task(coro, name=name)
@@ -392,6 +402,8 @@ class Supervisor:
             st = self.agents[existing]
             seen.add(existing)
             if st.busy():  # mid-restart: a new session is starting; wait for it to register
+                if rec.session_id != st.session_id:
+                    st.status, st.detached_since = Status.DETACHED, self.now()  # not joined until it registers
                 st.session_id, st.iterm_guid = rec.session_id, rec.iterm_guid
                 continue
             if rec.session_id == st.session_id:
@@ -996,7 +1008,8 @@ class Supervisor:
             st.phase = Phase.WORKING
 
     async def _exit_and_launch(self, agent: str, behavior: str, project: str, recovery: bool) -> bool:
-        """/exit, pre-launch, relaunch with "start project <project>". Done when the new session registers there."""
+        """Quit (see Actuator.quit), pre-launch, relaunch with "join project <project>". Done when the new session
+        registers there."""
         st, t, a = self.agents[agent], self.cfg.timing, self.cfg.agents[agent]
         st.phase = Phase.EXITING
         self._retire_session(st, "it is being restarted")
@@ -1008,7 +1021,12 @@ class Supervisor:
             job = (await self.term.job_name(agent) or "").lstrip("-")
             return job in a.process_names
 
-        await self.act.type(agent, behavior, T.EXIT, why="restart")
+        quit_ok, how = await self.act.quit(agent, behavior, why="restart")
+        if not quit_ok:
+            await self.say(project, f"{agent}: not restarting; couldn't quit it ({how}).")
+            await self.notifier.notify(f"agent-watcher: {agent}", f"Restart stopped: couldn't quit ({how})")
+            st.phase = Phase.WORKING
+            return False
         if not await self._poll(agent_running, want=False, timeout=t.exit_timeout_s):
             await self.act.interrupt(agent, behavior, why="agent did not exit")
             if not await self._poll(agent_running, want=False, timeout=t.exit_timeout_s):
@@ -1122,7 +1140,8 @@ class Supervisor:
             elif self.now() >= nxt:
                 self.next_cohort_at[project] = self._next_cohort_time(self.now())
                 self._save_state()
-                if self.cfg.mode("cohort_restart") != "off" and self.hosts_gm(project):
+                if self.cfg.timing.cohort_restart_scheduled and self.cfg.mode("cohort_restart") != "off" \
+                        and self.hosts_gm(project):
                     await self.start_cohort(project, "scheduled", ask_gm=True)
         for st in list(self.agents.values()):
             if not st.usage.introduced:  # from the tick, so readings from every source have arrived
@@ -1313,7 +1332,7 @@ class Supervisor:
             "paused": self.paused,
             "projects": {p: {"gm": self.gm(p), "agents": self.in_project(p),
                              "next_cohort_restart": dt.datetime.fromtimestamp(self.next_cohort_at[p]).isoformat()
-                             if self.next_cohort_at.get(p) else None}
+                             if self.next_cohort_at.get(p) and self.cfg.timing.cohort_restart_scheduled else None}
                          for p in sorted(self.channel.projects())},
             "modes": self.cfg.modes,
             "agents": {

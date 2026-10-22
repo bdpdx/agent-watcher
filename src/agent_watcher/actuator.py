@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Literal, Protocol
 
 from .config import Mode, ModelRotation, WatcherConfig
-from .detect import codex_status_effort, composer_draft, menu_items, screen_lines
+from .detect import CODEX_WORKING as _CODEX_WORKING, codex_status_effort, composer_draft, menu_items, screen_lines
 from .usage import Window, parse_usage_screen
 from .templates import T, launch_command, render
 
@@ -27,6 +27,13 @@ _USAGE_OPEN = re.compile(r"^\s*Settings\s+Status\s+Config\s+Usage|"
                          r"(Usage credits|d to day · w to week|% used)[^\n]*\n([^\n]*\n){0,4}\s*Esc to cancel\s*$", re.M)
 # A Claude turn in progress: "esc to interrupt", or the spinner line, e.g. "✢ Roosting… (20m 52s · ↓ 32.1k tokens)"
 _CLAUDE_WORKING = re.compile(r"esc to interrupt|^\s*\S\s+\S+…\s+\((\d+h\s*)?(\d+m\s*)?\d+s\b", re.I | re.M)
+
+
+# Codex's status line while it has background terminals ("1 background terminal running · /ps to view · /stop …")
+_CODEX_BACKGROUND = re.compile(r"\d+ background terminals? running")
+# Claude's exit menu when scheduled or background work would stop: option 1 must be the highlighted one
+_CLAUDE_BG_MENU = re.compile(r"Background work is running")
+_CLAUDE_BG_EXIT = re.compile(r"^\s*❯\s*1\.\s*Exit and stop tasks", re.M)
 
 
 class Terminal(Protocol):
@@ -172,6 +179,57 @@ class Actuator:
             if self.now() >= deadline:
                 return None
             await asyncio.sleep(self.cfg.timing.menu_step_s)
+
+    async def screen_idle(self, agent: str) -> bool:
+        """The agent looks idle on screen: its prompt box is showing and no turn is in progress."""
+        if not self.term.bound(agent):
+            return False
+        kind = self.cfg.agents[agent].kind
+        text = await self.term.screen_text(agent)
+        if composer_draft(text, kind) is None:
+            return False
+        plain = "\n".join(screen_lines(text))
+        working = _CLAUDE_WORKING if kind == "claude" else _CODEX_WORKING
+        return not working.search(plain)
+
+    async def quit(self, agent: str, behavior: str, why: str = "") -> tuple[bool, str]:
+        """Quit the agent from an empty prompt box: Codex `/stop` (if background terminals run), then `/quit`;
+        Claude `/quit`, then Enter on "Exit and stop tasks" if its background-work menu appears. (False, why)
+        with nothing typed when the prompt box isn't showing or holds a draft."""
+        mode = self.cfg.mode(behavior)
+        if mode != "live" or not self.term.bound(agent):
+            self.audit(agent, behavior, mode if self.term.bound(agent) else "dry", "QUIT", "/quit", why)
+            return False, f"{mode} mode" if mode != "live" else "no terminal bound"
+        kind = self.cfg.agents[agent].kind
+        async with self.locks[agent]:
+            await self._wait_owner_quiet(agent)
+            ok, how = await self._quit(agent, kind)
+        self.audit(agent, behavior, mode, "QUIT" if ok else "QUIT_FAILED", how, why)
+        return ok, how
+
+    async def _quit(self, agent: str, kind: str) -> tuple[bool, str]:
+        text = await self.term.screen_text(agent)
+        draft = composer_draft(text, kind)
+        if draft is None:
+            return False, "the prompt box isn't on screen"
+        if draft:
+            return False, f"a draft is in the prompt box: {draft[:80]!r}"
+        steps = []
+        if kind == "codex" and _CODEX_BACKGROUND.search("\n".join(screen_lines(text))):
+            await self._send_line(agent, render(T.STOP_BACKGROUND))
+            gone = await self._screen_shows(agent, _CODEX_BACKGROUND.pattern, want=False,
+                                            timeout=3 * self.cfg.timing.menu_timeout_s)
+            steps.append("/stop" + ("" if gone else " (background terminals still listed)"))
+        await self._send_line(agent, render(T.QUIT))
+        steps.append("/quit")
+        if kind == "claude":
+            menu = await self._screen_shows(agent, _CLAUDE_BG_MENU.pattern, timeout=self.cfg.timing.menu_timeout_s)
+            if menu is not None:
+                if not _CLAUDE_BG_EXIT.search(menu):
+                    return False, "the background-work menu isn't on \"Exit and stop tasks\"; nothing pressed"
+                await self.term.send_raw(agent, ENTER)
+                steps.append("Exit and stop tasks")
+        return True, ", ".join(steps)
 
     async def press(self, agent: str, behavior: str, key: Literal["allow", "deny"], why: str = "") -> bool:
         kind = self.cfg.agents[agent].kind

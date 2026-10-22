@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import shlex
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -68,7 +70,8 @@ class Timing:
     online_timeout_s: float = 10 * 60  # how long a relaunched agent has to rejoin its project
     cohort_ready_timeout_s: float = 90 * 60
     cohort_peer_timeout_s: float = 20 * 60  # GM host waits this long for other watchers' reports
-    cohort_restart_every_h: float = 12
+    cohort_restart_scheduled: bool = False  # True: the GM-host watcher asks the GM for a cohort restart on schedule
+    cohort_restart_every_h: float = 12  # the schedule (also the compaction-count period)
     cohort_restart_anchor: str = "06:00"  # local time the 12h cycle aligns to
     cohort_stagger_s: float = 5  # gap between agent relaunches in a cohort restart
     cant_continue_flags: int = 3  # safety flags without a successful turn
@@ -120,6 +123,14 @@ class WatcherConfig:
     codex_cyber: ModelRotation | None = None  # [codex_cyber]: the model a Codex agent moves to after a cyber block
     usage_report_left_pct: list[int] = field(default_factory=lambda: [25, 15, 10, 5])  # [usage] report_left_pct
     usage_intro_wait_s: float = 15 * 60  # post the join line with what's known after this long
+    start_script: str | None = None  # [launch] start_script, e.g. "~/.bin/start-{agent}": relaunch through it
+
+    def start_script_for(self, name: str) -> Path | None:
+        """The agent's start script, when [launch] start_script is set and the file is there and executable."""
+        if not self.start_script:
+            return None
+        path = _path(self.start_script.replace("{agent}", name))
+        return path if path.is_file() and os.access(path, os.X_OK) else None
 
     def gm_json(self, project: str) -> Path:
         return self.project_state_dir / project / "gm.json"
@@ -127,6 +138,8 @@ class WatcherConfig:
     def agent_config(self, name: str, kind: Kind, home: Path, clone: Path, launch: str) -> AgentConfig:
         """A runtime AgentConfig for a discovered agent, with agents.toml overrides applied."""
         o = self.overrides.get(name, {})
+        if "launch" not in o and (script := self.start_script_for(name)):
+            launch = f"{shlex.quote(str(script))} {{prompt}}"  # it sets the home and repo itself
         return AgentConfig(
             name=name, kind=kind, config_dir=home, clone=clone,
             launch=o.get("launch", launch),
@@ -225,6 +238,7 @@ def load(watcher_path: Path, agents_path: Path | None = None) -> WatcherConfig:
         local_kinds=local_kinds,
         codex_rotation=rotation("codex_capacity", need_efforts=True),
         codex_cyber=rotation("codex_cyber", need_efforts=False),
+        start_script=raw.get("launch", {}).get("start_script") or None,
         usage_report_left_pct=sorted((int(x) for x in raw.get("usage", {}).get("report_left_pct", [25, 15, 10, 5])),
                                      reverse=True),
     )

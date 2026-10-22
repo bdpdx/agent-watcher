@@ -67,10 +67,10 @@ window resets.
 
 | Behavior (`[modes]`) | Trigger | Action |
 |---|---|---|
-| `approvals_block` | Claude `PermissionDenied` hook; Codex auto-review denial (guardian rollout) | Policy lists first: own-clone git and `auto_approve` → authorize now; `refuse` / `owner_only` → owner decides; everything else → posted for the GM. On approve, when the agent is idle, it types "You are authorized to perform … If the action still needs to be performed retry it." |
+| `approvals_block` | Claude `PermissionDenied` hook; Codex auto-review denial (guardian rollout) | Policy lists first: own-clone git (except `git push`; git in project-state always goes to the GM) and `auto_approve` → authorize now; `refuse` / `owner_only` → owner decides; everything else → posted for the GM. On approve, it submits right away (mid-turn if needed; a draft in the prompt box is set aside and restored) "You are authorized to perform … If the action still needs to be performed retry it." |
 | `approvals_dialog` | Claude `PermissionRequest` (a real dialog) | Same decision; presses Allow or Deny, only when the dialog is visibly on screen |
 | `capacity` | `StopFailure` (overload, 5xx, disconnect, plan limit); Codex rollout errors; Codex capacity errors on screen | Posts it, waits (30s, backing off, or until the limit resets), switches the Codex model if `[codex_capacity]` is set, types `continue` |
-| `restart` | `restart <agent>` or `move <agent> <project>` from the GM/owner | `/exit` → pre-launch commands → relaunch with "start project <project>"; done when the new session registers there |
+| `restart` | `restart <agent>` or `move <agent> <project>` from the GM/owner | `/stop` (Codex, background terminals) and `/quit` (Claude: "Exit and stop tasks") → pre-launch commands → relaunch through the start script with "join project <project>"; done when the new session registers there |
 | `cohort_restart` | every 12h (GM-host watcher only), `restart cohort`, `cohort ready` | GM-host types the cohort sync request into the GM's terminal; on `cohort ready` every watcher restarts its agents; the GM restarts last |
 | `cant_continue` | Claude session-level refusal, or repeated safety refusals with no good turn | Careful-sync request (repeated case), then exit + relaunch with a recovery prompt |
 | `channel` | everything above | Posts reports and restart progress (compactions are only tracked, in `compactions.jsonl`) |

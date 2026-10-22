@@ -16,7 +16,7 @@ still restart or move it. Watchers say `Now watching <agent>` and `No longer wat
 - **Blocked actions**: `[agent-watcher-a/B-0142] codex-a blocked by Codex auto-review: the command
   `./sn reset dev12 --wipe`. Reason: … Reply approve or deny in this thread.`
   These need your decision.
-- Auto-approved actions (git confined to the agent's own clone or project-state, plus configured patterns) are
+- Auto-approved actions (git confined to the agent's own clone, except `git push`, plus configured patterns; git in project-state always comes to you) are
   not posted; the watcher's audit log records them.
 - **Refused actions**: matched a refuse rule (broad searches outside the workspace, credential stores, sudo,
   other users' files…). Only the owner can override these. **Owner-only** items (e.g. prod resets) also go
@@ -58,8 +58,8 @@ Unanswered items notify the owner after 15 minutes.
 
 | Command | Effect |
 |---|---|
-| `restart <agent>` | Exit the agent and relaunch it with "start project <project>". Post this only after the agent has synced and reported `SYNCED:`. |
-| `move <agent> <project>` | Like `restart`, but relaunches the agent into another project ("start project <project>"). That project must have its own `#<project>__agent-watcher` with this watcher in it, and the agent's bot must already be invited to the new project's channels. Coordinate with that project's GM first. |
+| `restart <agent>` | Exit the agent and relaunch it with "join project <project>". Post this only after the agent has synced and reported `SYNCED:`. |
+| `move <agent> <project>` | Like `restart`, but relaunches the agent into another project ("join project <project>"). That project must have its own `#<project>__agent-watcher` with this watcher in it, and the agent's bot must already be invited to the new project's channels. Coordinate with that project's GM first. |
 | `restart cohort` | Start a cohort restart. If the owner posts it, the GM's watcher types "Tell the cohort to … sync, cleanup, and prepare for restart" into your terminal. If you post it, coordinate the sync yourself. |
 | `cohort ready` | After every agent has reported `SYNCED:`. Each watcher restarts its machine's agents and posts `cohort done: …`. The watcher hosting you restarts you last, after the other watchers report. |
 | `grant <agent> authorization for <task>` | Type an authorization for `<task>` into the agent before it gets blocked, e.g. `grant codex-g1 authorization for the dev100001 Wipe Data run`. The watcher submits it right away (the agent reads it at its next tool call or when its turn ends): "<you>, the project's GM, has authorized this task for you: <task>. This covers only that task…". Name the task specifically; it applies to the agent's current session only. You can't grant yourself. |

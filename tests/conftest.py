@@ -16,7 +16,7 @@ def make_cfg(tmp: Path, mode: str = "live") -> WatcherConfig:
     timing = Timing(capacity_first_delay_s=0.05, capacity_max_tries=2, idle_wait_max_s=1, exit_timeout_s=1,
                     online_timeout_s=0.5, cohort_ready_timeout_s=2, cohort_peer_timeout_s=1,
                     careful_sync_timeout_s=0.3, owner_typing_grace_s=0.05, submit_delay_s=0, cohort_stagger_s=0.01,
-                    gm_answer_timeout_s=60, detached_grace_s=60)
+                    gm_answer_timeout_s=60, detached_grace_s=60, menu_timeout_s=0.2, menu_step_s=0.01)
     return WatcherConfig(
         project_state_dir=tmp / "code" / "project-state",
         owner_slack_id="UOWNER", authorized_humans=["UDANA"], state_dir=tmp / "state",
@@ -48,13 +48,14 @@ class FakeTerminal:
         self.jobs: dict[str, str] = {}
         self.screens: dict[str, str] = {}
         self.unbound: set[str] = set()
+        self.prompt_box = False  # True: agents without a set screen show an empty, idle prompt box
 
     def bound(self, agent):
         return agent not in self.unbound
 
     async def send_raw(self, agent, data):
         self.sent.setdefault(agent, []).append(data)
-        if data == "/exit":
+        if data in ("/exit", "/quit"):
             self.jobs[agent] = "zsh"
         if "claude " in data or "codex " in data:
             self.jobs[agent] = "claude" if "claude " in data else "codex"
@@ -63,7 +64,12 @@ class FakeTerminal:
         return self.jobs.get(agent, "claude" if agent.startswith("claude") else "codex")
 
     async def screen_text(self, agent):
-        return self.screens.get(agent, "")
+        if agent in self.screens or not self.prompt_box:
+            return self.screens.get(agent, "")
+        if agent.startswith("claude"):
+            rule = "─" * 40
+            return f"✻ Brewed for 8s\n{rule}\n❯\xa0\n{rule}\n  ⏵⏵ auto mode on"
+        return "• Done.\n\n› Ask Codex to do anything\n\n  GPT-6.1-Sol medium · ~/code/x · Context 9% used\n  ? for shortcuts"
 
     def lines(self, agent):
         """Submitted lines: text followed by a separate \\r."""

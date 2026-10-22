@@ -190,9 +190,9 @@ async def test_status_per_project(world):
 async def test_own_clone_git_auto_approved_not_posted(world):
     w = await world()
     await w.sup.handle(Event(E.IDLE, "codex-a", source="rollout"))
-    await w.sup.handle(blocked(w, "codex-a", "git push -f origin fix/x"))
+    await w.sup.handle(blocked(w, "codex-a", "git reset --hard origin/fix/x"))
     await settle()
-    assert w.term.lines("codex-a") == [render(T.AUTH, ["the command `git push -f origin fix/x`"])]
+    assert w.term.lines("codex-a") == [render(T.AUTH, ["the command `git reset --hard origin/fix/x`"])]
     assert w.chan.texts(P1) == []
     assert [r["action"] for r in audit(w.cfg) if r["behavior"] == "approvals_block"][0] == "POLICY_approve"
 
@@ -390,12 +390,30 @@ async def test_gm_post_refused_from_others(world):
 
 async def test_restart_completes_when_new_session_registers(world):
     w = await world()
+    w.term.prompt_box = True
     await w.sup.handle(Event(E.IDLE, "codex-a", source="rollout"))
     await w.sup.handle(msg("restart codex-a"))
     await relaunch_registers(w, "codex-a", P1)
     await settle(30)
     lines = w.term.lines("codex-a")
-    assert lines[0] == "/exit" and lines[1].endswith("'start project 2026-10-06-ui-fixes'")
+    assert lines[0] == "/quit" and lines[1].endswith("'join project 2026-10-06-ui-fixes'")
+    assert "codex-a restarted." in w.chan.texts(P1)
+
+
+async def test_restart_waits_for_the_new_session_to_register(world):
+    """A new session shows up before it has joined the project; "restarted" waits for its registration."""
+    w = await world()
+    w.term.prompt_box = True
+    await w.sup.handle(Event(E.IDLE, "codex-a", source="rollout"))
+    await w.sup.handle(msg("restart codex-a"))
+    await asyncio.sleep(0.15)
+    w.set("codex-a", project=None, session="s2")  # new session, not registered yet
+    w.scan()
+    await w.sup._notify_waiters()
+    await settle(15)
+    assert "codex-a restarted." not in w.chan.texts(P1)
+    await relaunch_registers(w, "codex-a", P1, after=0)
+    await settle(30)
     assert "codex-a restarted." in w.chan.texts(P1)
 
 
@@ -409,11 +427,12 @@ async def test_restart_that_never_rejoins_is_reported(world):
 
 async def test_move_between_watched_projects(world):
     w = await world(projects=(P1, P2))
+    w.term.prompt_box = True
     await w.sup.handle(Event(E.IDLE, "codex-g", source="rollout"))
     await w.sup.handle(msg(f"move codex-g to <#C9|{P2}>"))
     await relaunch_registers(w, "codex-g", P2)
     await settle(30)
-    assert w.term.lines("codex-g")[1].endswith(f"'start project {P2}'")
+    assert w.term.lines("codex-g")[1].endswith(f"'join project {P2}'")
     assert w.sup.agents["codex-g"].project == P2
     assert any("moving here" in t for t in w.chan.texts(P2)) and "codex-g moved to " + P2 + "." in w.chan.texts(P1)
 
@@ -428,6 +447,7 @@ async def test_move_to_unwatched_project_refused(world):
 
 async def test_cohort_gm_host_flow(world):
     w = await world()
+    w.term.prompt_box = True
     for a in ("claude-a", "codex-a", "codex-g"):
         await w.sup.handle(Event(E.IDLE, a, source="hook:Stop"))
     await w.sup.handle(msg("restart cohort", tier=Tier.OWNER, sender="owner", is_bot=False))
@@ -444,17 +464,18 @@ async def test_cohort_gm_host_flow(world):
     await w.sup.handle(msg("cohort done: agent-watcher-m restarted codex-m", tier=Tier.OTHER,
                            sender="agent-watcher-m", is_bot=True))
     await settle(20)
-    assert w.term.lines("claude-a")[1] == "/exit"
+    assert w.term.lines("claude-a")[1] == "/quit"
 
 
 async def test_cohort_non_host_restarts_local_agents_only(world):
     w = await world(gms={P1: "codex-m"})
+    w.term.prompt_box = True
     await w.sup.handle(msg("cohort ready", sender="codex-m"))
     for a in ("claude-a", "codex-a", "codex-g"):
         await relaunch_registers(w, a, P1, after=0.03)
     await settle(40)
     for a in ("claude-a", "codex-a", "codex-g"):
-        assert w.term.lines(a)[0] == "/exit"
+        assert w.term.lines(a)[0] == "/quit"
     assert not any("Restarting the GM" in t for t in w.chan.texts())
 
 
@@ -514,11 +535,12 @@ async def test_context_reports_thresholds_once(world):
 
 async def test_session_refusal_recovers(world):
     w = await world()
+    w.term.prompt_box = True
     await w.sup.handle(Event(E.SESSION_REFUSAL, "claude-a", {"text": "flagged this session"}))
     await relaunch_registers(w, "claude-a", P1)
     await settle(30)
     lines = w.term.lines("claude-a")
-    assert lines[0] == "/exit" and lines[1] == "clear" and "after a safety block" in lines[2]
+    assert lines[0] == "/quit" and lines[1] == "clear" and "after a safety block" in lines[2]
 
 
 async def test_gm_change_invites_new_gm(world):
