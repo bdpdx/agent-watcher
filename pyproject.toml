@@ -6,6 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
     "iterm2>=2.30",
     "slack_bolt>=1.30",
+    "aiohttp>=3.9",
     "pydantic>=2.14",
 ]
 
