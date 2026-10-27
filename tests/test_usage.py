@@ -9,8 +9,8 @@ from agent_watcher.actuator import Actuator
 from agent_watcher.detect import from_codex_main_line
 from agent_watcher.events import E, Event
 from agent_watcher.supervisor import Supervisor
-from agent_watcher.usage import (AgentUsage, Window, claude_rate_limits, parse_usage_screen, scrape_interval,
-                                 update)
+from agent_watcher.usage import (AgentUsage, Window, claude_rate_limits, fmt_reset, parse_usage_screen,
+                                 scrape_interval, update)
 
 from .conftest import FakeChannel, FakeNotifier, FakeTerminal, make_cfg, record
 from .test_supervisor import settle
@@ -109,12 +109,12 @@ async def test_codex_join_line_then_quiet_then_crossing(tmp_path):
             await sup.handle(ev)
     await sup.tick()
     await settle(5)
-    assert [t for t in chan.texts() if "usage" in t or "left" in t] == [
-        "codex-g usage: weekly 54% left (resets Sat Oct 24 4:16 PM)"]
+    reset = fmt_reset(1792883772, sup.now())  # "resets Sat Oct 24 4:16 PM", or just the time on that day
+    assert [t for t in chan.texts() if "usage" in t or "left" in t] == [f"codex-g usage: weekly 54% left ({reset})"]
     for ev in from_codex_main_line(token_count(77.0, ts="2026-10-19T20:00:00Z"), "codex-g"):
         await sup.handle(ev)
     await settle(5)
-    assert chan.texts()[-1] == "codex-g: weekly 23% left (resets Sat Oct 24 4:16 PM)."
+    assert chan.texts()[-1] == f"codex-g: weekly 23% left ({reset})."
 
 
 async def test_tick_skips_usage_read_while_working(tmp_path):
@@ -130,7 +130,8 @@ async def test_hello_line_includes_known_usage(tmp_path):
     cfg, sup, chan = make_sup(tmp_path, FakeTerminal())
     sup.agents["codex-g"].usage.windows["weekly"] = Window(46.0, 1792883772)
     await sup._on_channel_ready("2026-10-06-ui-fixes")
-    assert chan.texts()[-1].splitlines()[1] == "codex-g usage: weekly 54% left (resets Sat Oct 24 4:16 PM)"
+    reset = fmt_reset(1792883772, sup.now())
+    assert chan.texts()[-1].splitlines()[1] == f"codex-g usage: weekly 54% left ({reset})"
     assert sup.agents["codex-g"].usage.introduced
 
 
@@ -247,3 +248,9 @@ def test_statusline_prints_wrapped_line_without_a_daemon(tmp_path, monkeypatch, 
                                                              "workspace": {"current_dir": "/x"}})))
     assert cli.statusline("cat >/dev/null; printf 'host:/x'") == 0
     assert capsys.readouterr().out == "host:/x"
+
+
+def test_fmt_reset_shows_the_date_unless_it_is_today():
+    at = dt.datetime(2026, 10, 24, 16, 16).timestamp()
+    assert fmt_reset(at, dt.datetime(2026, 10, 19, 9, 0).timestamp()) == "resets Sat Oct 24 4:16 PM"
+    assert fmt_reset(at, dt.datetime(2026, 10, 24, 9, 0).timestamp()) == "resets 4:16 PM"

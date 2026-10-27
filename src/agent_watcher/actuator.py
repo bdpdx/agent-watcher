@@ -193,7 +193,8 @@ class Actuator:
         return not working.search(plain)
 
     async def quit(self, agent: str, behavior: str, why: str = "") -> tuple[bool, str]:
-        """Quit the agent from an empty prompt box: Codex `/stop` (if background terminals run), then `/quit`;
+        """Quit the agent from an empty prompt box: Codex Esc (if a turn is running), `/stop` (if background
+        terminals run), then `/quit`;
         Claude `/quit`, then Enter on "Exit and stop tasks" if its background-work menu appears. (False, why)
         with nothing typed when the prompt box isn't showing or holds a draft."""
         mode = self.cfg.mode(behavior)
@@ -215,6 +216,12 @@ class Actuator:
         if draft:
             return False, f"a draft is in the prompt box: {draft[:80]!r}"
         steps = []
+        if kind == "codex" and _CODEX_WORKING.search("\n".join(screen_lines(text))):
+            await self.term.send_raw(agent, ESC)  # a turn still running (the idle wait timed out): interrupt it
+            stopped = await self._screen_shows(agent, _CODEX_WORKING.pattern, want=False,
+                                               timeout=3 * self.cfg.timing.menu_timeout_s)
+            steps.append("Esc" + ("" if stopped else " (still working)"))
+            text = await self.term.screen_text(agent)
         if kind == "codex" and _CODEX_BACKGROUND.search("\n".join(screen_lines(text))):
             await self._send_line(agent, render(T.STOP_BACKGROUND))
             gone = await self._screen_shows(agent, _CODEX_BACKGROUND.pattern, want=False,
@@ -388,7 +395,7 @@ class Actuator:
         await self.term.send_raw(agent, rot.confirm_key)
         if await self._screen_shows(agent, r"Select Reasoning Level", want=False) is None:
             return await back_out(2, "the effort menu did not close")
-        return True, f"{rot.model} {current or '?'} -> {rot.model} {nxt}"
+        return True, f"{rot.model}, effort {current or '?'} -> {nxt}"
 
     async def _do(self, agent: str, behavior: str, action: str, detail: str, why: str, fn) -> bool:
         mode = self.cfg.mode(behavior)

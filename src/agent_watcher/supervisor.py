@@ -117,6 +117,11 @@ class Pending:
 
 _PENDING_SAVED = ("id", "agent", "project", "kind", "desc", "rule", "owner_only", "created", "session", "thread_ts")
 
+# Posts that only a watcher makes, giving its name: "<name> online: watching …", "cohort done: <name> restarted …",
+# "[<name>/B-0142] …".
+_PEER_POST = re.compile(r"^(?:(\S+) online: watching |cohort done: (\S+) restarted |\[([a-z0-9][a-z0-9_-]*)/[A-Z]-\d+\])",
+                        re.I)
+
 
 @dataclass
 class Changes:
@@ -157,6 +162,7 @@ class Supervisor:
         self.cohort_flow: dict[str, asyncio.Task] = {}
         self.peers: dict[str, dict[str, set[str]]] = {}  # project -> other watcher bot -> its agents
         self.peer_done: dict[str, dict[str, float]] = {}  # project -> other watcher bot -> "cohort done" time
+        self.peer_watchers: dict[str, list[str]] = {}  # project -> other watcher bots ever seen posting (saved)
         self.last_gm: dict[str, str] = {}
         self.gm_announced: dict[str, str] = {}  # project -> GM named by a `gm <agent>` post; wins over gm.json
         self.gm_file_seen: dict[str, str | None] = {}  # project -> gm.json's GM when last read; a change there wins
@@ -189,6 +195,8 @@ class Supervisor:
         self.gm_announced = ann if isinstance(ann, dict) else {}
         seen = raw.get("gm_file_seen")
         self.gm_file_seen = seen if isinstance(seen, dict) else {}
+        peers = raw.get("peer_watchers")
+        self.peer_watchers = peers if isinstance(peers, dict) else {}
         for d in raw.get("pending") or []:  # open requests survive a restart; a later session still never gets one
             try:
                 self.pending[d["id"]] = Pending(**{k: d[k] for k in _PENDING_SAVED if k in d})
@@ -204,7 +212,7 @@ class Supervisor:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         raw = {"next_cohort_at": self.next_cohort_at, "paused": self.paused, "paused_agents": sorted(self.paused_names),
                "seq": self.seq, "last_gm": self.last_gm, "gm_announced": self.gm_announced,
-               "gm_file_seen": self.gm_file_seen,
+               "gm_file_seen": self.gm_file_seen, "peer_watchers": self.peer_watchers,
                "compaction_cycle": {"start": self.cycle_start, "end": self.cycle_end, "counts": self.cycle_compactions},
                "cyber_return": self.cyber_return,
                "pending": [{k: getattr(p, k) for k in _PENDING_SAVED} for p in self.pending.values() if not p.resolved]}
@@ -451,6 +459,8 @@ class Supervisor:
                 self._on_compaction(st, ev)
             elif ev.kind is E.CONTEXT and ev.data.get("baseline"):
                 self._on_context(st, ev)
+            elif ev.kind in (E.CAPACITY, E.RATE_LIMIT) and self._just_relaunched(st):
+                self._on_capacity(st, ev)  # its first turn (the join) can hit capacity before it has registered
             elif st.status is Status.DETACHED or st.phase is not Phase.WORKING:
                 pass  # not in its project right now, or restarting: no reports, no actions
             else:
@@ -560,6 +570,11 @@ class Supervisor:
 
     # ---- capacity / disconnects --------------------------------------------------------------------
 
+    def _just_relaunched(self, st: AgentState) -> bool:
+        """Relaunched by the watcher in the last 2 hours and not back in its project yet."""
+        return bool(st.launched_at) and self.now() - st.launched_at < 7200 and \
+            (st.phase is Phase.LAUNCHING or st.status is Status.DETACHED)
+
     def _on_capacity(self, st: AgentState, ev: Event) -> None:
         st.idle, st.last_error = True, ev.ts
         if st.retry_task and not st.retry_task.done():
@@ -568,21 +583,20 @@ class Supervisor:
         text = clean(ev.data.get("text", ""), 160)
         if ev.kind is E.RATE_LIMIT and ev.data.get("resume_at"):
             delay = max(30.0, ev.data["resume_at"] - self.now() + 60)
-        else:
-            if st.capacity_tries >= t.capacity_max_tries:
-                self._post(st.project, f"{st.name}: still failing after {st.capacity_tries} retries "
-                                       f"(\"{text}\"). Stopped retrying; owner notified.")
-                self._spawn(self.notifier.notify(f"agent-watcher: {st.name}", f"Still failing: {text[:120]}"),
-                            "notify")
-                return
-            delay = t.capacity_first_delay_s * (2 ** st.capacity_tries)
+        else:  # back off exponentially up to the cap; never give up (an outage can last an hour)
+            delay = min(t.capacity_first_delay_s * (2 ** min(st.capacity_tries, 20)), t.capacity_max_delay_s)
             if ev.kind is E.RATE_LIMIT:
                 delay = max(delay, 300)
         st.capacity_tries += 1
+        if st.capacity_tries == t.capacity_max_tries:
+            self._spawn(self.notifier.notify(f"agent-watcher: {st.name}", f"Still failing after "
+                                             f"{st.capacity_tries} retries, still retrying: {text[:100]}"), "notify")
         then = "Switching model and sending" if self.cfg.codex_rotation and self.cfg.agents[st.name].kind == "codex" \
             else "Sending"
-        self._post(st.project, f"{st.name}: turn stopped (\"{text}\"). {then} `continue` in {round(delay)}s "
-                               f"(try {st.capacity_tries}/{t.capacity_max_tries}).")
+        per_hour = max(1, round(3600 / max(delay, 1)))
+        if st.capacity_tries <= 3 or st.capacity_tries % per_hour == 0:  # don't flood the channel in a long outage
+            self._post(st.project, f"{st.name}: turn stopped (\"{text}\"). {then} `continue` in {round(delay)}s "
+                                   f"(try {st.capacity_tries}; retrying until it works).")
         st.retry_task = self._spawn(self._continue_after(st, ev.ts, delay, text, ev.source == "screen"),
                                     f"retry:{st.name}")
 
@@ -657,10 +671,18 @@ class Supervisor:
             head += f" Reason: {reason.rstrip('.')}."
         for note in pr.notes:
             head += f" Note: {clean(note, 200)}."
+        opinion = None
+        if self.cfg.mode("assess") != "off":  # one post: the request with its second opinion, if that's quick
+            opinion = self._spawn(self._assess(p, a, reviewer, reason), f"assess:{p.id}")
+            done, _ = await asyncio.wait({opinion}, timeout=self.cfg.assess.wait_s)
+            if done:
+                text, opinion = opinion.result(), None
+                if text and self.cfg.mode("assess") == "live":
+                    head += f" {self._opinion_line(text)}"
         p.thread_ts = await self._post_pending(p, head)
         self._save_state()  # with its thread, so a reply there still decides it after a restart
-        if self.cfg.mode("assess") != "off":
-            self._spawn(self._assess(p, a, reviewer, reason), f"assess:{p.id}")
+        if opinion is not None:
+            self._spawn(self._late_opinion(p, opinion), f"assess-late:{p.id}")
         if pr.verdict is Verdict.REFUSE and kind == "dialog":
             await self._execute(p, approve=False)
         if pr.verdict is Verdict.GM:
@@ -668,15 +690,22 @@ class Supervisor:
         elif pr.verdict is Verdict.OWNER:
             await self.notifier.notify(f"agent-watcher: {st.name}", f"Needs your decision: {desc[:120]}")
 
-    async def _assess(self, p: Pending, a, reviewer: str, reason: str) -> None:
-        """A one-line second opinion from a small model, in the request's thread. Advisory only."""
+    async def _assess(self, p: Pending, a, reviewer: str, reason: str) -> str | None:
+        """A one-line second opinion from a small model. Advisory only."""
         text = await self.assessor(agent=p.agent, clone=str(a.clone), state=str(self.cfg.project_state_dir),
                                    reviewer=reviewer, reason=reason, action=p.desc)
-        if not text:
-            return
-        self.act.audit(p.agent, "assess", self.cfg.mode("assess"), "ASSESS", text, p.id)
-        if self.cfg.mode("assess") == "live" and not p.resolved:
-            await self.say(p.project, f"Second opinion ({self.cfg.assess.model}, advisory): {text}", p.thread_ts)
+        if text:
+            self.act.audit(p.agent, "assess", self.cfg.mode("assess"), "ASSESS", text, p.id)
+        return text
+
+    def _opinion_line(self, text: str) -> str:
+        return f"Second opinion ({self.cfg.assess.model}, advisory): {text.rstrip('.')}."
+
+    async def _late_opinion(self, p: Pending, task: asyncio.Task) -> None:
+        """An opinion that missed the request's post goes in its thread."""
+        text = await task
+        if text and self.cfg.mode("assess") == "live" and not p.resolved:
+            await self.say(p.project, self._opinion_line(text), p.thread_ts)
 
     async def _post_pending(self, p: Pending, head: str | None = None) -> str | None:
         head = head or f"[{self._qualified(p.id)}] still pending for {p.agent}: {p.desc}."
@@ -1223,6 +1252,11 @@ class Supervisor:
 
     def _on_peer(self, project: str, sender: str, text: str, ts: float) -> None:
         body = text.strip()
+        if m := _PEER_POST.match(body):
+            name = (m.group(1) or m.group(2) or m.group(3)).lower()
+            if name != self.channel.name.lower() and name not in self.peer_watchers.get(project, []):
+                self.peer_watchers.setdefault(project, []).append(name)
+                self._save_state()
         if " online: watching " in body:
             agents = body.split(" online: watching ", 1)[1]
             self.peers.setdefault(project, {})[sender] = \
@@ -1244,11 +1278,19 @@ class Supervisor:
                         reply_to: str | None, ts: float) -> None:
         match cmd.verb:
             case "approve" | "deny":
-                p = None
-                if cmd.event_id and (cmd.event_bot in (None, self.channel.name.lower())):
-                    p = self.pending.get(cmd.event_id)
-                elif thread_ts:
-                    p = next((x for x in self.pending.values() if x.thread_ts == thread_ts), None)
+                if cmd.event_bot not in (None, self.channel.name.lower()):
+                    return  # another watcher's event
+                in_thread = next((x for x in self.pending.values() if thread_ts and x.thread_ts == thread_ts), None)
+                p = self.pending.get(cmd.event_id) if cmd.event_id else in_thread
+                if p is not None and cmd.event_id and cmd.event_bot is None and p is not in_thread \
+                        and self.peer_watchers.get(project):
+                    # Every watcher numbers its own requests, so with another watcher here a bare id outside
+                    # the request's own thread could name either watcher's request.
+                    if not thread_ts and p.project == project:
+                        await self.say(project, f"More than one watcher is in this channel, so `{cmd.event_id}` "
+                                                f"alone is ambiguous: post `{cmd.verb} {self._qualified(p.id)}` or "
+                                                "reply in the request's thread.", reply_to)
+                    return
                 if p is None or p.project != project:
                     return  # another watcher's event, another project's, or not an event thread
                 await self._decide(p, cmd.verb == "approve", sender, tier, cmd.note)

@@ -45,3 +45,10 @@ def test_grant_parses_the_agent_and_task():
     c = parse("grant codex-g1 to push `dev/x` to <https://github.com/example-org/r|github.com/example-org/r>")
     assert c.note == "push dev/x to https://github.com/example-org/r"
     assert parse("grant codex-g1") is None and parse("grant codex-g1 authorization for") is None
+
+
+def test_slack_escapes_are_undone_but_typed_brackets_never_become_mentions():
+    c = parse("grant codex-g1 authorization for running hold --operation &lt;instance name&gt; &amp;&amp; check")
+    assert c.note == "running hold --operation <instance name> && check"
+    c = parse("approve B-0142 fine &lt;@U999&gt;")
+    assert c.note.endswith("<@U999>") and c.mentioned is False

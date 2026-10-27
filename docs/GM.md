@@ -38,7 +38,9 @@ Writes outside the project's folders (the agent's clone and worktrees, project-s
 folders) are refused by rule, like credential stores and broad searches; only the owner can override those.
 
 Reply in the event's thread with `approve` or `deny` (a short note may follow), or post
-`approve agent-watcher-a/B-0142` / `deny agent-watcher-a/B-0142` at top level.
+`approve agent-watcher-a/B-0142` / `deny agent-watcher-a/B-0142` at top level. Each watcher numbers its own
+requests, so once more than one watcher has posted in this channel a bare `approve B-0142` is refused as
+ambiguous; include the watcher's name or reply in the thread.
 
 On approve, the watcher submits right away, even mid-turn: "You are authorized to perform <the blocked
 action>. If the action still needs to be performed retry it." The agent reads it at its next tool call or when its

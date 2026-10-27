@@ -87,6 +87,33 @@ def test_codex_session_from_main_rollout_and_launch(tmp_path):
     assert launch.endswith("{prompt}")
 
 
+def test_codex_ignores_earlier_sessions_still_written_after_the_registered_one(tmp_path):
+    import datetime as dt
+    import os
+    home = tmp_path / ".codex-b"
+    cwd = tmp_path / "c"
+    day = dt.date.today()
+    rd = home / "sessions" / f"{day.year:04d}" / f"{day.month:02d}" / f"{day.day:02d}"
+    rd.mkdir(parents=True)
+    now = dt.datetime.now(dt.timezone.utc)
+
+    def session(name, sid, started_h_ago, written_s_ago):
+        f = rd / f"rollout-{name}.jsonl"
+        stamp = (now - dt.timedelta(hours=started_h_ago)).isoformat().replace("+00:00", "Z")
+        f.write_text(json.dumps({"type": "session_meta", "payload": {
+            "id": sid, "thread_source": "user", "cwd": str(cwd), "timestamp": stamp}}) + "\n")
+        t = now.timestamp() - written_s_ago
+        os.utime(f, (t, t))
+    session("morning", "T-MORNING", 12, 0)  # the app-server still writes to it
+    session("evening", "T-EVENING", 1, 1800)  # quiet for half an hour
+    d = Discovery(lambda cmd: "")
+    assert d.codex_session(home, cwd) == "T-MORNING"  # nothing registered: the newest written
+    write_state(home, [{"project": "p1", "agent": "codex-b", "session_id": "T-EVENING"}])
+    assert d.codex_session(home, cwd) == "T-EVENING"  # the earlier session no longer takes over
+    session("restart", "T-RESTART", 0.01, 5)  # a restart: started after the registered one
+    assert d.codex_session(home, cwd) == "T-RESTART"
+
+
 def test_unregistered_session_has_no_regs(tmp_path):
     home = tmp_path / ".codex-x"
     procs = {30: {"name": "codex", "args": "codex", "cwd": tmp_path,

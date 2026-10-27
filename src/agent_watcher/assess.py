@@ -48,6 +48,7 @@ class AssessConfig:
     claude: str = "claude"  # the CLI to run
     config_dir: str | None = None  # CLAUDE_CONFIG_DIR for the call; None: the default ~/.claude login
     timeout_s: float = 60
+    wait_s: float = 20  # how long a request's post waits for the opinion; later ones go in its thread
 
 
 class Assessor:

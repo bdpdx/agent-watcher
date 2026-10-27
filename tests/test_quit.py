@@ -1,6 +1,6 @@
 """Quitting an agent for a restart: Codex /stop then /quit; Claude /quit and its background-work menu."""
 
-from agent_watcher.actuator import ENTER, Actuator
+from agent_watcher.actuator import ENTER, ESC, Actuator
 
 from .conftest import FakeTerminal, make_cfg, record
 
@@ -22,21 +22,25 @@ CLAUDE_MENU = """✻ Brewed for 8s · done 10:11 AM
 
 
 class FakeTUI(FakeTerminal):
-    def __init__(self, kind, background=False, draft="", menu_on=1):
+    def __init__(self, kind, background=False, draft="", menu_on=1, working=False):
         super().__init__()
         self.kind, self.background, self.draft, self.menu_on = kind, background, draft, menu_on
+        self.working = working
         self.menu = False
 
     async def screen_text(self, agent):
         if self.kind == "codex":
             bg = " · 1 background terminal running · /ps to view · /stop to close" if self.background else ""
-            return CODEX_IDLE.format(bg=bg).replace("Ask Codex to do anything", self.draft or "Ask Codex to do anything")
+            idle = CODEX_IDLE.replace("• Done.", "• Working (2m 3s • esc to interrupt)") if self.working else CODEX_IDLE
+            return idle.format(bg=bg).replace("Ask Codex to do anything", self.draft or "Ask Codex to do anything")
         if self.menu:
             return CLAUDE_MENU.format(a="❯" if self.menu_on == 1 else " ", b="❯" if self.menu_on == 2 else " ")
         return CLAUDE_IDLE.format(draft=self.draft)
 
     async def send_raw(self, agent, data):
         await super().send_raw(agent, data)
+        if data == ESC:
+            self.working = False
         if data == "/stop":
             self.background = False
         if data == "/quit" and self.kind == "claude" and self.background:
@@ -56,6 +60,13 @@ async def test_codex_stops_background_terminals_then_quits(tmp_path):
     act, name = make(tmp_path, tui, "codex")
     ok, how = await act.quit(name, "restart")
     assert ok and how == "/stop, /quit" and tui.lines(name) == ["/stop", "/quit"]
+
+
+async def test_codex_running_turn_is_interrupted_first(tmp_path):
+    tui = FakeTUI("codex", background=True, working=True)
+    act, name = make(tmp_path, tui, "codex")
+    ok, how = await act.quit(name, "restart")
+    assert ok and how == "Esc, /stop, /quit" and tui.sent[name][0] == ESC and tui.lines(name) == ["/stop", "/quit"]
 
 
 async def test_codex_without_background_just_quits(tmp_path):

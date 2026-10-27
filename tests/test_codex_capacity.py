@@ -158,7 +158,7 @@ async def test_switch_moves_to_next_effort_for_this_session(tmp_path):
     cfg, act, _ = make(tmp_path, tui)
     assert await act.codex_switch_model("codex-g", "capacity", ROT)
     assert tui.effort == "High" and tui.state == "composer" and tui.sent["codex-g"][-1] == "s"
-    assert audit(cfg)[-1]["detail"] == "GPT-6.1-Sol Medium -> GPT-6.1-Sol High"
+    assert audit(cfg)[-1]["detail"] == "GPT-6.1-Sol, effort Medium -> High"
 
 
 async def test_switch_wraps_from_extra_high_to_medium(tmp_path):
@@ -326,7 +326,7 @@ async def test_cyber_switch_goes_back_after_a_good_turn(tmp_path):
     assert tui.model == "GPT-6.1-Sol" and tui.effort == "High" and not sup.cyber_return
     assert "Switched back to GPT-6.1-Sol" in sup.notifier.notes[-1]
     assert [a["detail"] for a in audit(cfg) if a["action"] == "MODEL_SWITCH"][-1] == \
-        "GPT-6.1-Sol High -> GPT-6.1-Sol High"
+        "GPT-6.1-Sol, effort High -> High"
 
 
 async def test_cyber_block_in_a_project_switches_and_posts(tmp_path):

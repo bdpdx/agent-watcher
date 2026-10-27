@@ -50,6 +50,7 @@ def _clean(text: str) -> tuple[str, set[str]]:
     text = MENTION.sub(" ", text)
     text = CHANNEL_LINK.sub(lambda m: m.group(1), text)
     text = URL_LINK.sub(lambda m: m.group(1), text)
+    text = text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")  # Slack's escapes, after the links
     text = text.replace("`", " ").replace("*", " ")
     return re.sub(r"\s+", " ", text).strip(), mentioned
 

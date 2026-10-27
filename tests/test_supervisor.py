@@ -272,6 +272,61 @@ async def test_decision_from_another_projects_channel_ignored(world):
     assert len(w.chan.posts) == 1
 
 
+async def test_bare_id_approves_with_no_other_watcher(world):
+    w = await world()
+    await w.sup.handle(Event(E.IDLE, "codex-a", source="rollout"))
+    await w.sup.handle(blocked(w, "codex-a", "./sn reset dev12"))
+    await settle()
+    await w.sup.handle(msg("approve B-0001"))
+    await settle()
+    assert w.term.lines("codex-a") == [render(T.AUTH, ["the command `./sn reset dev12`"])]
+
+
+def peer_post(text, sender="agent-watcher-m"):
+    return msg(text, tier=Tier.OTHER, sender=sender, is_bot=True)
+
+
+async def test_bare_id_ambiguous_once_another_watcher_posts(world):
+    w = await world()
+    await w.sup.handle(peer_post("[agent-watcher-m/B-0001] codex-m blocked by Codex auto-review: …"))
+    await w.sup.handle(Event(E.IDLE, "codex-a", source="rollout"))
+    await w.sup.handle(blocked(w, "codex-a", "./sn reset dev12"))
+    await settle()
+    await w.sup.handle(msg("approve B-0001"))
+    await settle()
+    assert w.term.sent.get("codex-a") is None and not w.sup.pending["B-0001"].resolved
+    assert "`approve agent-watcher-a/B-0001`" in w.chan.texts(P1)[-1]
+    await w.sup.handle(msg("approve agent-watcher-m/B-0001"))  # the other watcher's request
+    await settle()
+    assert w.term.sent.get("codex-a") is None
+    await w.sup.handle(msg("approve agent-watcher-a/B-0001"))
+    await settle()
+    assert w.term.lines("codex-a") == [render(T.AUTH, ["the command `./sn reset dev12`"])]
+
+
+async def test_bare_id_with_another_watcher_ok_in_own_thread_and_silent_in_others(world):
+    w = await world()
+    await w.sup.handle(peer_post("agent-watcher-m online: watching codex-m"))
+    await w.sup.handle(Event(E.IDLE, "codex-a", source="rollout"))
+    await w.sup.handle(blocked(w, "codex-a", "./sn reset dev12"))
+    await settle()
+    posts = len(w.chan.posts)
+    await w.sup.handle(msg("approve B-0001", thread_ts="ts-other-watcher"))
+    await settle()
+    assert w.term.sent.get("codex-a") is None and len(w.chan.posts) == posts
+    await w.sup.handle(msg("approve B-0001", thread_ts="ts1"))
+    await settle()
+    assert w.term.lines("codex-a") == [render(T.AUTH, ["the command `./sn reset dev12`"])]
+
+
+async def test_other_watchers_remembered_across_restart(world):
+    w = await world()
+    await w.sup.handle(peer_post("cohort done: agent-watcher-m restarted codex-m"))
+    await w.sup.handle(peer_post("just chatting", sender="some-bot"))
+    again = Supervisor(w.cfg, w.term, Actuator(w.cfg, w.term, w.cfg.state_dir / "audit.log"), w.chan, w.notes)
+    assert again.peer_watchers == {P1: ["agent-watcher-m"]}
+
+
 async def test_approval_text_never_reaches_terminal(world):
     w = await world()
     await w.sup.handle(Event(E.IDLE, "codex-a", source="rollout"))
@@ -653,7 +708,57 @@ async def test_request_gets_an_advisory_second_opinion_in_its_thread(world):
     w.sup.assessor = fake
     await w.sup.handle(blocked(w, "codex-a", "./sn reset dev12", reason="destructive"))
     await settle()
-    project, text, thread = w.chan.posts[-1]
-    assert thread == "ts1" and text.startswith("Second opinion (") and "Looks project-related" in text
+    [(project, text, thread)] = w.chan.posts  # one post: the request with its opinion before the reply line
+    assert thread is None and "./sn reset dev12" in text
+    assert text.index("Second opinion (") < text.index("Looks project-related") < text.index("Reply `approve`")
     assert seen["agent"] == "codex-a" and "./sn reset dev12" in seen["action"] and seen["reason"] == "destructive"
     assert w.term.sent.get("codex-a") is None  # advisory only: nothing typed
+
+
+async def test_a_slow_second_opinion_follows_in_the_thread(world):
+    w = await world()
+    w.cfg.modes["assess"] = "live"
+    w.cfg.assess.wait_s = 0.05
+    go = asyncio.Event()
+
+    async def slow(**kw):
+        await go.wait()
+        return "Unclear: no context."
+    w.sup.assessor = slow
+    await w.sup.handle(blocked(w, "codex-a", "./sn reset dev12"))
+    await settle()
+    assert len(w.chan.posts) == 1 and "Second opinion" not in w.chan.posts[0][1]
+    go.set()
+    await settle()
+    project, text, thread = w.chan.posts[-1]
+    assert thread == "ts1" and text.startswith("Second opinion (") and "Unclear" in text
+
+
+async def test_capacity_retries_never_stop_and_back_off_to_a_cap(world):
+    w = await world()
+    w.cfg.timing.capacity_first_delay_s, w.cfg.timing.capacity_max_delay_s = 10, 600
+    st = w.sup.agents["codex-a"]
+    delays = []
+    w.sup._continue_after = lambda st_, ts, delay, text, from_screen=False: _record(delays, delay)
+    for _ in range(12):  # well past capacity_max_tries (2 in tests)
+        st.retry_task = None
+        await w.sup.handle(Event(E.CAPACITY, "codex-a", {"text": "Selected model is at capacity."}, source="rollout"))
+    await settle()
+    assert delays[:7] == [10, 20, 40, 80, 160, 320, 600] and set(delays[7:]) == {600} and len(delays) == 12
+    assert len(w.notes.notes) == 1 and "still retrying" in w.notes.notes[0]
+    assert not any("Stopped retrying" in t for t in w.chan.texts())
+
+
+async def _record(delays, delay):
+    delays.append(delay)
+
+
+async def test_capacity_while_a_restarted_agent_is_joining_is_retried(world):
+    w = await world()
+    st = w.sup.agents["codex-a"]
+    st.launched_at, st.status = w.sup.now(), Status.DETACHED  # relaunched, not registered yet
+    seen = []
+    w.sup._continue_after = lambda st_, ts, delay, text, from_screen=False: _record(seen, delay)
+    await w.sup.handle(Event(E.CAPACITY, "codex-a", {"text": "Selected model is at capacity."}, source="screen"))
+    await settle()
+    assert seen, "a capacity error during the join should be retried"

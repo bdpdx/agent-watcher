@@ -66,7 +66,8 @@ class Keys:
 @dataclass
 class Timing:
     capacity_first_delay_s: float = 30
-    capacity_max_tries: int = 5
+    capacity_max_tries: int = 5  # notify the owner after this many failed retries (retrying continues)
+    capacity_max_delay_s: float = 600  # the retry delay doubles up to this; retries never stop
     idle_wait_max_s: float = 20 * 60  # how long to wait for idle before typing anyway
     exit_timeout_s: float = 90
     online_timeout_s: float = 10 * 60  # how long a relaunched agent has to rejoin its project

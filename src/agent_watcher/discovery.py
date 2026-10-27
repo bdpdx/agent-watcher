@@ -133,10 +133,11 @@ class Discovery:
         files = list(d.glob("*.jsonl")) if d.is_dir() else []
         return max(files, key=lambda p: p.stat().st_mtime).stem if files else None
 
-    def codex_session(self, home: Path, cwd: Path) -> str | None:
+    def codex_sessions(self, home: Path, cwd: Path) -> list[tuple[float, float, str]]:
+        """The user sessions under cwd from the last few days, as (mtime, started, id), newest written first."""
         root = home / "sessions"
         today = dt.date.today()
-        best: tuple[float, str] | None = None
+        found: list[tuple[float, float, str]] = []
         for delta in (-2, -1, 0, 1):
             d = today + dt.timedelta(days=delta)
             day = root / f"{d.year:04d}" / f"{d.month:02d}" / f"{d.day:02d}"
@@ -158,10 +159,22 @@ class Discovery:
                 mcwd = Path(meta.get("cwd", "/nonexistent"))
                 if mcwd != cwd and cwd not in mcwd.parents:
                     continue
-                mtime = p.stat().st_mtime
-                if best is None or mtime > best[0]:
-                    best = (mtime, meta.get("id") or meta.get("session_id"))
-        return best[1] if best else None
+                sid = meta.get("id") or meta.get("session_id")
+                if sid:
+                    mtime = p.stat().st_mtime
+                    found.append((mtime, _started(meta.get("timestamp"), mtime), sid))
+        return sorted(found, reverse=True)
+
+    def codex_session(self, home: Path, cwd: Path) -> str | None:
+        """The newest-written session, ignoring any that started before the one registered in a project: the
+        Codex app-server can keep writing to an agent's earlier sessions, which must not displace its registered
+        one. A session started after it (a restart) still takes over."""
+        found = self.codex_sessions(home, cwd)
+        registered = [f for f in found if self.registrations(home, f[2])]
+        if registered:
+            since = max(f[1] for f in registered)
+            found = [f for f in found if f[1] >= since]
+        return found[0][2] if found else None
 
     @staticmethod
     def registrations(home: Path, session_id: str | None) -> list[Registration]:
@@ -196,6 +209,13 @@ class Discovery:
                               else self.codex_session(rec.home, rec.cwd))
             rec.regs = self.registrations(rec.home, rec.session_id)
         return list(records.values())
+
+
+def _started(stamp: str | None, fallback: float) -> float:
+    try:
+        return dt.datetime.fromisoformat(str(stamp).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return fallback
 
 
 def state_files(records: list[AgentRecord]) -> list[Path]:
