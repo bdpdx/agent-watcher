@@ -149,7 +149,8 @@ class FakeClaudeTUI(FakeTerminal):
         popup = "  ❯ /usage                      Show session cost, plan usage, and activity stats\n" \
             if self.buf == "/usage" else ""
         spin = "✻ Working… (12s · esc to interrupt)\n" if self.working else ""
-        return f"{self.transcript}{spin}{popup}────\n❯\xa0{self.buf}\n────\n  ⏵⏵ auto mode on"
+        rule = "─" * 40
+        return f"{self.transcript}{spin}{popup}{rule}\n❯\xa0{self.buf}\n{rule}\n  ⏵⏵ auto mode on"
 
     async def send_raw(self, agent, data):
         await super().send_raw(agent, data)
@@ -200,7 +201,16 @@ async def test_usage_reader_leaves_a_draft_alone(tmp_path):
     tui.buf = "half a thought"
     cfg, sup, _ = make_sup(tmp_path, tui, ("claude-a",))
     assert await sup.act.claude_usage("claude-a", "usage_check") is None
-    assert tui.buf == "half a thought" and "\x1b" not in tui.sent["claude-a"]
+    assert tui.buf == "half a thought" and "claude-a" not in tui.sent
+
+
+async def test_usage_reader_never_types_into_a_shell(tmp_path):
+    """Claude exited and the pane is back at a shell (here running brew): nothing is typed."""
+    tui = FakeClaudeTUI()
+    tui.open, tui.screen = True, "==> Do you want to proceed with the upgrade? [y/n]\n$ "
+    cfg, sup, _ = make_sup(tmp_path, tui, ("claude-a",))
+    assert await sup.act.claude_usage("claude-a", "usage_check") is None
+    assert "claude-a" not in tui.sent
 
 
 async def test_usage_reader_never_touches_a_working_session(tmp_path):

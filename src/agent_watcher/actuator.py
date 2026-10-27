@@ -285,7 +285,7 @@ class Actuator:
     async def claude_usage(self, agent: str, behavior: str) -> dict[str, Window] | None:
         """Read Claude's /usage screen (plan usage limits), then close it. None if not read.
 
-        Only from an idle prompt: "/usage" must show as the highlighted slash command (so the prompt was empty)
+        Only from an idle, empty prompt box (never a shell or another program left in the pane): "/usage" must show as the highlighted slash command (so the prompt was empty)
         before Enter, and Esc is sent only while the usage screen is showing (Esc interrupts a working session).
         """
         mode = self.cfg.mode(behavior)
@@ -298,12 +298,20 @@ class Actuator:
             return None
         async with self.locks[agent]:
             await self._wait_owner_quiet(agent)
+            if not self.term.bound(agent):  # it exited while we waited
+                return None
             ok, detail, windows = await self._usage_screen(agent)
         self.audit(agent, behavior, mode, "USAGE_READ" if ok else "USAGE_READ_FAILED", detail)
         return windows if ok else None
 
     async def _usage_screen(self, agent: str) -> tuple[bool, str, dict[str, Window]]:
-        if _CLAUDE_WORKING.search("\n".join(screen_lines(await self.term.screen_text(agent)))):
+        text = await self.term.screen_text(agent)
+        draft = composer_draft(text, "claude")
+        if draft is None:
+            return False, "the prompt box isn't on screen", {}
+        if draft:
+            return False, "a draft is in the prompt box", {}
+        if _CLAUDE_WORKING.search("\n".join(screen_lines(text))):
             return False, "agent is working", {}
         cmd = render(T.USAGE_SCREEN)
         await self.term.send_raw(agent, cmd)
