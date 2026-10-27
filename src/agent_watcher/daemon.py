@@ -1,4 +1,4 @@
-"""The daemon: wires discovery, hooks, session logs, the channels and iTerm2 to the supervisor."""
+"""The daemon: wires discovery, hooks, session logs, the channels and the terminals (iTerm2, tmux) to the supervisor."""
 
 from __future__ import annotations
 
@@ -15,8 +15,8 @@ from .config import CHANNEL_SUFFIX, WatcherConfig
 from .detect import codex_screen_capacity, from_hook
 from .discovery import Discovery, transcript_dir
 from .events import E, Event
-from .iterm import ITermTerminal
 from .supervisor import Supervisor
+from .terminals import Terminals
 from .tails import ClaudeTranscriptTailer, RolloutTailer
 from .usage import claude_rate_limits
 
@@ -58,7 +58,7 @@ class Daemon:
         self.cfg = cfg
         self.queue: asyncio.Queue[Event] = asyncio.Queue()
         self._rescan = asyncio.Event()
-        self.term = ITermTerminal(cfg, self.emit, on_change=self._rescan.set)
+        self.term = Terminals(cfg, self.emit, on_change=self._rescan.set)
         self.actuator = Actuator(cfg, self.term, cfg.state_dir / "audit.log")
         self.discovery = Discovery()
         tokens = slack_tokens(cfg)
@@ -110,7 +110,7 @@ class Daemon:
             if task:
                 task.cancel()
         for name, st in list(self.sup.agents.items()):
-            await self.term.bind(name, st.iterm_guid)
+            await self.term.bind(name, st.term_id)
             acfg = self.cfg.agents[name]
             if acfg.kind == "claude" and st.session_id:
                 path = transcript_dir(st.home, acfg.clone) / f"{st.session_id}.jsonl"

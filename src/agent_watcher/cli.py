@@ -4,7 +4,7 @@
   agent-watcher hook --kind claude|codex      (called by agent hooks; reads the payload on stdin)
   agent-watcher statusline [--then CMD]       (Claude statusLine command: forwards usage limits, prints CMD's line)
   agent-watcher install-statusline HOME [--dry-run]
-  agent-watcher status | restart <agent>|cohort:<project> | pause [agent] | resume [agent]
+  agent-watcher status | restart <agent>|cohort:<project> | pause [agent] | resume [agent] | usage <agent>
 """
 
 from __future__ import annotations
@@ -123,6 +123,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("status")
     rs = sub.add_parser("restart")
     rs.add_argument("agent")
+    sub.add_parser("usage", help="read a Claude agent's /usage now (once it's idle)").add_argument("agent")
     for c in ("pause", "resume"):
         sub.add_parser(c).add_argument("agent", nargs="?")
     args = p.parse_args(argv)

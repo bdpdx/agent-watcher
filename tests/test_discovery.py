@@ -45,7 +45,7 @@ def test_claude_default_home_session_and_registration(tmp_path, monkeypatch):
     recs = Discovery(runner(procs)).scan()
     assert len(recs) == 1
     r = recs[0]
-    assert r.home == home and r.iterm_guid == "GUID-A" and r.cwd == cwd
+    assert r.home == home and r.term_id == "iterm:GUID-A" and r.cwd == cwd
     assert [(g.agent, g.project) for g in r.regs] == [("claude-a", "p1")]  # stale registration ignored
     assert "CLAUDE_CONFIG_DIR" not in r.launch_command()
 

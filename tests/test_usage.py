@@ -254,3 +254,19 @@ def test_fmt_reset_shows_the_date_unless_it_is_today():
     at = dt.datetime(2026, 10, 24, 16, 16).timestamp()
     assert fmt_reset(at, dt.datetime(2026, 10, 19, 9, 0).timestamp()) == "resets Sat Oct 24 4:16 PM"
     assert fmt_reset(at, dt.datetime(2026, 10, 24, 9, 0).timestamp()) == "resets 4:16 PM"
+
+
+async def test_local_usage_command_makes_the_read_due_now(tmp_path):
+    tui = FakeClaudeTUI()
+    cfg, sup, _ = make_sup(tmp_path, tui, ("claude-a",))
+    st = sup.agents["claude-a"]
+    st.idle = True
+    st.usage.next_scrape = sup.now() + 24 * 3600
+    await sup.tick()
+    await settle(5)
+    assert "claude-a" not in tui.sent  # not due yet
+    assert sup.control("usage", "claude-a")["ok"]
+    await sup.tick()
+    await settle(20)
+    assert set(st.usage.windows) == {"session", "week", "fable"}
+    assert not sup.control("usage", "nobody")["ok"]

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import subprocess
+import time
 from typing import Awaitable, Callable
 
 import iterm2
@@ -33,6 +35,7 @@ class ITermTerminal:
         self.app: iterm2.App | None = None
         self.sessions: dict[str, str] = {}  # agent -> session_id
         self._key_tasks: dict[str, asyncio.Task] = {}
+        self._retry_at = 0.0  # monotonic time before which a failed connection isn't retried
 
     # ---- Terminal protocol --------------------------------------------------------------------
 
@@ -63,7 +66,7 @@ class ITermTerminal:
     # ---- binding ---------------------------------------------------------------------------------
 
     async def bind(self, agent: str, session_id: str) -> None:
-        if self.sessions.get(agent) == session_id or self.app is None:
+        if self.sessions.get(agent) == session_id or not await self._connect():
             return
         await self.app.async_refresh()
         s = self.app.get_session_by_id(session_id)
@@ -113,8 +116,29 @@ class ITermTerminal:
                 await asyncio.sleep(3)  # let the shell and agent start
                 self.on_change()
 
-    async def start(self) -> None:
-        self.conn = await iterm2.Connection.async_create()
-        self.app = await iterm2.async_get_app(self.conn)
+    async def _connect(self) -> bool:
+        """Connect to iTerm2 if it's running. Never launches it (the API's cookie request would); a watcher
+        whose agents are all in tmux doesn't need it. A failed attempt is retried after a minute."""
+        if self.app is not None:
+            return True
+        if time.monotonic() < self._retry_at:
+            return False
+        self._retry_at = time.monotonic() + 60
+        running = await asyncio.to_thread(subprocess.run, ["pgrep", "-x", "iTerm2"], capture_output=True)
+        if running.returncode != 0:
+            return False
+        try:
+            self.conn = await iterm2.Connection.async_create()
+            self.app = await iterm2.async_get_app(self.conn)
+        except Exception as e:  # noqa: BLE001 - API disabled, permission refused, ...
+            log.warning("can't connect to iTerm2: %s", e)
+            self.conn = self.app = None
+            return False
         asyncio.create_task(self._watch_terminations(), name="iterm:terminations")
         asyncio.create_task(self._watch_new_sessions(), name="iterm:new")
+        log.info("connected to iTerm2")
+        return True
+
+    async def start(self) -> None:
+        if not await self._connect():
+            log.info("iTerm2 not connected; agents in iTerm2 tabs connect it when found")

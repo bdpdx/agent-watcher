@@ -1,7 +1,7 @@
 [project]
 name = "agent-watcher"
 version = "0.1.0"
-description = "Process helper that supervises CLI coding agents running in iTerm2"
+description = "Process helper that supervises CLI coding agents running in tmux or iTerm2"
 requires-python = ">=3.12"
 dependencies = [
     "iterm2>=2.30",

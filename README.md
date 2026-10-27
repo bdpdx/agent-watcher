@@ -1,9 +1,9 @@
 # agent-watcher
 
-agent-watcher is a process helper for CLI coding agents (Claude Code and Codex) running in iTerm2 tabs. It
-learns what each agent is doing from its **hooks and session logs**, reports to one Slack channel per project,
-`#<project>__agent-watcher`, and carries out decisions from that project's **GM** (and the owner) by typing a
-small fixed set of strings into the agents' terminals. It is not a project worker. No Slack text and no
+agent-watcher is a process helper for CLI coding agents (Claude Code and Codex) running in tmux panes or
+iTerm2 tabs. It learns what each agent is doing from its **hooks and session logs**, reports to one Slack channel
+per project, `#<project>__agent-watcher`, and carries out decisions from that project's **GM** (and the owner) by
+typing a small fixed set of strings into the agents' terminals. It is not a project worker. No Slack text and no
 model output is ever typed into a terminal.
 
 Each developer machine runs its own watcher and bot (e.g. `agent-watcher-a`); all of them share each project's
@@ -15,16 +15,17 @@ The watcher follows a **1:1:1 rule: one agent home ↔ one bot ↔ one project**
 
 - **Projects** are the `*__agent-watcher` channels this watcher's bot belongs to. Invite the bot to a
   project's channel and the watcher serves it; remove it and it stops.
-- **Agents** are found by scanning running `claude` / `codex` processes that have a terminal in an iTerm2 tab.
-  Each process's environment gives its home (`CLAUDE_CONFIG_DIR` / `CODEX_HOME`, default `~/.claude` /
-  `~/.codex`) and tab (`ITERM_SESSION_ID`); its working directory is its clone.
+- **Agents** are found by scanning running `claude` / `codex` processes that run in a tmux pane or an iTerm2
+  tab. Each process's environment gives its home (`CLAUDE_CONFIG_DIR` / `CODEX_HOME`, default `~/.claude` /
+  `~/.codex`) and terminal (`TMUX` + `TMUX_PANE`, else `ITERM_SESSION_ID`); its working directory is its clone.
+  tmux wins when both are set, since a tmux server started from iTerm2 passes that tab's id to every pane.
 - An agent is **managed exactly while its current session is registered in a watched project**, per its
   Slack listener's state (`<home>/slack-agent-chat/state.json`), i.e. after `chat project join`. Before
   that, nothing is reported. If the registration disappears but the same session keeps running (agents stop
   their Slack watcher before a cohort restart), the agent is **detached**: reports stop, but it can still be
   restarted or moved, for up to `detached_grace_s`.
-- Scans run on iTerm2 tab changes, on hook events from unknown sessions, on listener state changes, and every
-  `discovery_sweep_s`.
+- Scans run on tmux pane and iTerm2 tab changes, on hook events from unknown sessions, on listener state
+  changes, and every `discovery_sweep_s`.
 - 1:1:1 violations (two sessions on one home, one session in two projects) are reported and left alone.
 - Relaunch commands are rebuilt from the running process. `agents.toml` is optional per-agent overrides
   (`launch`, `pre_launch`, `worktree_roots`).
@@ -98,8 +99,12 @@ Thread replies count only under the watcher's own posts. Refused and owner-only 
    in the env file is never used. Don't run a slack-mcp-server listener on the same app. Each project's GM
    creates `#<project>__agent-watcher` and invites the watcher bot. Also subscribe to `member_left_channel`
    and `group_left` so the watcher notices when it's removed.
-4. **iTerm2.** Run the daemon in its own tab: `.venv/bin/agent-watcher run`. Choose "Always allow" when
-   iTerm2 asks.
+4. **Terminal.** Run the daemon in its own tmux window or iTerm2 tab: `.venv/bin/agent-watcher run`.
+   - **tmux:** nothing to set up. The watcher reads panes with `capture-pane` and types through a paste buffer.
+     It holds off while you're typing in an agent's pane (a client showing the pane reports new key activity)
+     or scrolling it (copy mode), and never types into a pane in copy mode.
+   - **iTerm2:** enable the Python API (Settings → General → Magic) and choose "Always allow" when iTerm2 asks.
+     The watcher connects only while iTerm2 is running, and never launches it.
 5. **Claude hooks.** Add the bridge next to the existing slack-mcp-server hooks in each agent's
    `settings.json`, under `PermissionDenied`, `PermissionRequest`, `StopFailure`, `Stop`, `UserPromptSubmit`,
    `Notification`, `SessionStart`, `SessionEnd`:
@@ -108,7 +113,7 @@ Thread replies count only under the watcher's own posts. Refused and owner-only 
    ```
    It exits 0 at once, prints nothing and decides nothing. Codex needs no hooks: its errors, denials,
    context size and compactions come from its rollout files.
-6. **Local control.** `agent-watcher status`, `restart <agent>|cohort:<project>`, `pause [agent]`,
+6. **Local control.** `agent-watcher status`, `restart <agent>|cohort:<project>`, `usage <agent>` (read `/usage` once idle), `pause [agent]`,
    `resume [agent]`.
 
 ## Before going live
@@ -126,7 +131,7 @@ Thread replies count only under the watcher's own posts. Refused and owner-only 
 ```
 src/agent_watcher/
   cli.py         run / hook / local control
-  daemon.py      wires hooks socket, session logs, channel, iTerm2 to the supervisor
+  daemon.py      wires hooks socket, session logs, channel, terminals to the supervisor
   discovery.py   running agents → home, tab, clone, session, registration; relaunch commands
   supervisor.py  managed agents; approvals; restarts and moves; per-project cohorts; reports
   channel.py     the per-project Slack channels: discovery by name, posting, inviting, incoming messages
@@ -136,6 +141,8 @@ src/agent_watcher/
   templates.py   the closed set of typed strings
   detect.py      hook payload / rollout / transcript / error-text classification
   tails.py       Codex rollouts (main + auto-review threads) and Claude transcripts
+  terminals.py   routes each agent to its terminal backend
+  tmux.py        tmux adapter (binding, screen, job name, typing, owner activity)
   iterm.py       iTerm2 adapter (binding, screen, job name, keystroke monitor)
 docs/GM.md       the GM's guide to the channel and commands
 ```

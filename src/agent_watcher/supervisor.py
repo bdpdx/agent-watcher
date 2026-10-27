@@ -63,7 +63,7 @@ class AgentState:
     project: str
     home: Path
     session_id: str | None = None
-    iterm_guid: str = ""
+    term_id: str = ""
     status: Status = Status.MANAGED
     detached_since: float = 0
     phase: Phase = Phase.WORKING
@@ -333,7 +333,7 @@ class Supervisor:
                 p.agent == name and not p.resolved and p.session and p.session != rec.session_id
                 for p in self.pending.values()):
             self._retire_session(st, "it restarted", keep=rec.session_id)
-        st.project, st.home, st.iterm_guid = project, rec.home, rec.iterm_guid
+        st.project, st.home, st.term_id = project, rec.home, rec.term_id
         st.session_id, st.status, st.detached_since = rec.session_id, Status.MANAGED, 0
         st.paused = name in self.paused_names
         return st
@@ -399,7 +399,7 @@ class Supervisor:
                 name = local_name(home)
                 prev = self.agents.get(name)
                 if prev is not None and prev.busy():
-                    prev.session_id, prev.iterm_guid = rec.session_id, rec.iterm_guid
+                    prev.session_id, prev.term_id = rec.session_id, rec.term_id
                 else:
                     self.attach(rec, name, LOCAL_PROJECT)
                     if prev is None or prev.project != LOCAL_PROJECT:
@@ -414,7 +414,7 @@ class Supervisor:
             if st.busy():  # mid-restart: a new session is starting; wait for it to register
                 if rec.session_id != st.session_id:
                     st.status, st.detached_since = Status.DETACHED, self.now()  # not joined until it registers
-                st.session_id, st.iterm_guid = rec.session_id, rec.iterm_guid
+                st.session_id, st.term_id = rec.session_id, rec.term_id
                 continue
             if rec.session_id == st.session_id:
                 if st.status is not Status.DETACHED:
@@ -1425,4 +1425,11 @@ class Supervisor:
                 self.paused = val
             self._save_state()
             return {"ok": True}
+        if cmd == "usage":
+            if arg not in self.agents:
+                return {"ok": False, "error": f"unknown agent {arg}"}
+            if self.cfg.agents[arg].kind != "claude" or self.cfg.mode("usage_check") == "off":
+                return {"ok": False, "error": f"no /usage reads for {arg} (Claude agents, usage_check not off)"}
+            self.agents[arg].usage.next_scrape = 0  # due now; the tick reads it once the agent is idle
+            return {"ok": True, "note": f"{arg}: /usage is read on the next tick it's idle"}
         return {"ok": False, "error": f"unknown command {cmd}"}

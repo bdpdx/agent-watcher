@@ -1,7 +1,8 @@
 """Discovery of running agents (no configured list).
 
-Chain, per running `claude` / `codex` process that lives in an iTerm2 tab:
-  process env  -> AGENT_HOME (CLAUDE_CONFIG_DIR / CODEX_HOME, default ~/.claude / ~/.codex), ITERM_SESSION_ID
+Chain, per running `claude` / `codex` process that lives in a tmux pane or an iTerm2 tab:
+  process env  -> AGENT_HOME (CLAUDE_CONFIG_DIR / CODEX_HOME, default ~/.claude / ~/.codex),
+                  terminal (TMUX + TMUX_PANE, else ITERM_SESSION_ID)
   process cwd  -> clone
   home + cwd   -> current session id (Claude: hook session_id, else newest transcript; Codex: newest main rollout)
   state.json   -> the listener's cohort registrations for that session: bot name + project
@@ -22,12 +23,13 @@ from typing import Callable
 
 from .detect import rollout_meta
 from .iterm import session_guid
+from .tmux import pane_ref
 
 Runner = Callable[[list[str]], str]
 
 HOME_VARS = {"claude": "CLAUDE_CONFIG_DIR", "codex": "CODEX_HOME"}
 DEFAULT_HOMES = {"claude": "~/.claude", "codex": "~/.codex"}
-_ENV = re.compile(r"(?:^|\s)(CLAUDE_CONFIG_DIR|CODEX_HOME|ITERM_SESSION_ID)=(\S+)")
+_ENV = re.compile(r"(?:^|\s)(CLAUDE_CONFIG_DIR|CODEX_HOME|ITERM_SESSION_ID|TMUX|TMUX_PANE)=(\S+)")
 
 # Codex flags worth keeping when rebuilding a launch command (flag -> takes a value).
 _CODEX_FLAGS = {"--remote": True, "-C": True, "--cd": True, "-m": True, "--model": True, "-c": True,
@@ -58,7 +60,7 @@ class AgentRecord:
     kind: str
     home: Path
     pid: int
-    iterm_guid: str
+    term_id: str  # "tmux:<pane>:<socket>" or "iterm:<session GUID>"
     cwd: Path
     argv: list[str]
     session_id: str | None = None
@@ -110,9 +112,11 @@ class Discovery:
         if not args or not full:
             return None
         env = dict(_ENV.findall(full[len(args):] if full.startswith(args) else full))
-        guid = session_guid(env.get("ITERM_SESSION_ID"))
-        if not guid:
-            return None  # not in an iTerm2 tab (e.g. the Codex app-server)
+        # tmux first: a tmux server started from iTerm2 hands that tab's ITERM_SESSION_ID to every pane.
+        pane, guid = pane_ref(env.get("TMUX"), env.get("TMUX_PANE")), session_guid(env.get("ITERM_SESSION_ID"))
+        term_id = f"tmux:{pane}" if pane else f"iterm:{guid}" if guid else None
+        if not term_id:
+            return None  # not in a tmux pane or an iTerm2 tab (e.g. the Codex app-server)
         home = Path(env.get(HOME_VARS[kind]) or DEFAULT_HOMES[kind]).expanduser()
         cwd_out = self.run(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"])
         cwd = next((Path(ln[1:]) for ln in cwd_out.splitlines() if ln.startswith("n")), None)
@@ -122,7 +126,7 @@ class Discovery:
             argv = shlex.split(args)
         except ValueError:
             argv = args.split()
-        return AgentRecord(kind, home, pid, guid, cwd, argv)
+        return AgentRecord(kind, home, pid, term_id, cwd, argv)
 
     # ---- sessions -----------------------------------------------------------------------------
 
@@ -200,7 +204,7 @@ class Discovery:
                 rec = self._proc(pid, kind)
                 if rec is None:
                     continue
-                key = (rec.home, rec.iterm_guid)
+                key = (rec.home, rec.term_id)
                 if key in records and records[key].pid < pid:
                     continue  # one tab may hold a wrapper and its child; keep the parent
                 records[key] = rec

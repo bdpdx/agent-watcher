@@ -37,7 +37,7 @@ _CLAUDE_BG_EXIT = re.compile(r"^\s*❯\s*1\.\s*Exit and stop tasks", re.M)
 
 
 class Terminal(Protocol):
-    """What the actuator and supervisor need from iTerm2 (faked in tests)."""
+    """What the actuator and supervisor need from the agent's terminal (faked in tests)."""
 
     def bound(self, agent: str) -> bool: ...
 
