@@ -297,7 +297,9 @@ def screen_lines(text: str) -> list[str]:
 
 
 _RULE = re.compile(r"^\s*─{20,}\s*$")
-_CODEX_STATUS = re.compile(r" · Context \d+% used|^\s*\? for shortcuts")
+# The footer can lead with other hints ("← for agents · ? for shortcuts"), and a narrow pane cuts the status line
+# before "Context N% used"
+_CODEX_STATUS = re.compile(r" · Context \d+% used|(?:^|·)\s*\? for shortcuts")
 CODEX_PLACEHOLDERS = {"Ask Codex to do anything", "Ask a follow-up question"}
 # Claude's dim text in an empty prompt box: an example prompt, or the hint shown while messages are queued
 _CLAUDE_PLACEHOLDER = re.compile(r'^(Try ".*"|Press up to (edit|select) (a )?queued messages?\b.*)$')
@@ -327,6 +329,8 @@ def composer_draft(text: str, kind: str) -> str | None:
             status = next((k for k, ln in enumerate(below) if _CODEX_STATUS.search(ln)), None)
             if status is None:
                 return None
+            if status and _STATUS_EFFORT.match(below[status - 1]):  # a cut status line just above the footer
+                status -= 1
             body = [lines[i][1:].strip()] + [ln.strip() for ln in below[:status]]  # every line counts
             draft = "\n".join(b for b in body if b).strip()
             return "" if draft in CODEX_PLACEHOLDERS else draft

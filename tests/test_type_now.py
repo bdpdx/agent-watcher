@@ -118,3 +118,7 @@ def test_composer_draft_reads_real_screens():
     assert composer_draft(codex, "codex") == ""
     assert composer_draft(codex.replace("Ask Codex to do anything", "fix it"), "codex") == "fix it"
     assert composer_draft("Select Model and Effort\n› 1. GPT-6.1-Sol", "codex") is None
+    narrow = ("  Worked for 2s • 9:33 AM\n› Ask Codex to do anything\n"
+              "  GPT-6.1-Sol medium · ~/code/rezilient-codex-f1 · …\n  ← for agents · ? for shortcuts")
+    assert composer_draft(narrow, "codex") == ""
+    assert composer_draft(narrow.replace("Ask Codex to do anything", "fix it"), "codex") == "fix it"
