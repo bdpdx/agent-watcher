@@ -280,3 +280,11 @@ async def test_local_usage_command_makes_the_read_due_now(tmp_path):
     await settle(20)
     assert set(st.usage.windows) == {"session", "week", "fable"}
     assert not sup.control("usage", "nobody")["ok"]
+
+
+def test_control_commands_find_the_socket_in_the_configs_state_dir(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("AGENT_WATCHER_SOCK", raising=False)
+    cfg = tmp_path / "watcher.toml"
+    cfg.write_text(f'state_dir = "{tmp_path / "state"}"\n')
+    assert cli.main(["status", "--config", str(cfg)]) == 1
+    assert str(tmp_path / "state" / "watcher.sock") in capsys.readouterr().err

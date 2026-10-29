@@ -114,7 +114,8 @@ Thread replies count only under the watcher's own posts. Refused and owner-only 
    It exits 0 at once, prints nothing and decides nothing. Codex needs no hooks: its errors, denials,
    context size and compactions come from its rollout files.
 6. **Local control.** `agent-watcher status`, `restart <agent>|cohort:<project>`, `usage <agent>` (read `/usage` once idle), `pause [agent]`,
-   `resume [agent]`.
+   `resume [agent]`. Each finds the daemon through `--config` (default `watcher.toml`): its `state_dir` holds the
+   socket. `AGENT_WATCHER_SOCK` overrides it.
 
 ## Before going live
 

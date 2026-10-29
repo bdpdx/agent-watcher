@@ -5,6 +5,7 @@
   agent-watcher statusline [--then CMD]       (Claude statusLine command: forwards usage limits, prints CMD's line)
   agent-watcher install-statusline HOME [--dry-run]
   agent-watcher status | restart <agent>|cohort:<project> | pause [agent] | resume [agent] | usage <agent>
+                [--config watcher.toml]      (finds the daemon's socket in the config's state_dir)
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ import socket
 import subprocess
 import sys
 import time
+import tomllib
 from pathlib import Path
 
 from .daemon import socket_path
@@ -42,6 +44,15 @@ def _send(msg: dict, want_reply: bool, timeout: float) -> dict | None:
         return json.loads(data or b"{}")
     finally:
         s.close()
+
+
+def _use_config_socket(config_path: Path) -> None:
+    """Point the control commands at the daemon that `run --config` started: its socket is in state_dir.
+    AGENT_WATCHER_SOCK, when set, still wins."""
+    if os.environ.get("AGENT_WATCHER_SOCK") or not config_path.is_file():
+        return
+    state_dir = tomllib.loads(config_path.read_text()).get("state_dir", "~/.agent-watcher")
+    os.environ["AGENT_WATCHER_SOCK"] = str(socket_path(Path(state_dir).expanduser()))
 
 
 def hook(kind: str) -> int:
@@ -120,12 +131,15 @@ def main(argv: list[str] | None = None) -> int:
     ins = sub.add_parser("install-statusline")
     ins.add_argument("home", help="a Claude config dir, e.g. ~/.claude-a")
     ins.add_argument("--dry-run", action="store_true")
-    sub.add_parser("status")
-    rs = sub.add_parser("restart")
+    ctl = argparse.ArgumentParser(add_help=False)
+    ctl.add_argument("--config", default="watcher.toml", help="the daemon's watcher.toml (for its state_dir)")
+    sub.add_parser("status", parents=[ctl])
+    rs = sub.add_parser("restart", parents=[ctl])
     rs.add_argument("agent")
-    sub.add_parser("usage", help="read a Claude agent's /usage now (once it's idle)").add_argument("agent")
+    sub.add_parser("usage", parents=[ctl],
+                   help="read a Claude agent's /usage now (once it's idle)").add_argument("agent")
     for c in ("pause", "resume"):
-        sub.add_parser(c).add_argument("agent", nargs="?")
+        sub.add_parser(c, parents=[ctl]).add_argument("agent", nargs="?")
     args = p.parse_args(argv)
 
     if args.cmd == "hook":
@@ -149,6 +163,7 @@ def main(argv: list[str] | None = None) -> int:
         os.environ.setdefault("AGENT_WATCHER_SOCK", str(cfg.state_dir / "watcher.sock"))
         asyncio.run(Daemon(cfg).run())
         return 0
+    _use_config_socket(Path(args.config).expanduser())
     try:
         reply = _send({"type": "cmd", "cmd": args.cmd, "arg": getattr(args, "agent", None)}, True, 10.0)
     except OSError as e:
