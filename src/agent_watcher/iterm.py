@@ -124,7 +124,8 @@ class ITermTerminal:
         if time.monotonic() < self._retry_at:
             return False
         self._retry_at = time.monotonic() + 60
-        running = await asyncio.to_thread(subprocess.run, ["pgrep", "-x", "iTerm2"], capture_output=True)
+        # -a: macOS pgrep skips its own ancestors, and a watcher started from an iTerm2 tab descends from iTerm2.
+        running = await asyncio.to_thread(subprocess.run, ["pgrep", "-a", "-x", "iTerm2"], capture_output=True)
         if running.returncode != 0:
             return False
         try:
