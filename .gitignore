@@ -4,3 +4,5 @@ __pycache__/
 agents.toml
 watcher.toml
 .pytest_cache/
+.gitignored/*
+!.gitignored/.gitkeep
