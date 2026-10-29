@@ -33,7 +33,7 @@ from .discovery import AgentRecord
 from .events import E, Event, Tier
 from .policy import Policy, Verdict
 from .templates import T, clean, describe_action
-from .usage import LABELS, AgentUsage, fmt_window, scrape_interval, summary, update
+from .usage import LABELS, AgentUsage, fmt_reset, fmt_window, scrape_interval, summary, update
 
 log = logging.getLogger(__name__)
 
@@ -73,6 +73,7 @@ class AgentState:
     last_good_turn: float = 0
     last_error: float = 0
     capacity_tries: int = 0
+    limit_posted: tuple | None = None  # (limit, resets at) last posted, so each limit is posted once
     safety_flags: deque = field(default_factory=lambda: deque(maxlen=20))
     pending_auth: list[tuple[str | None, str]] = field(default_factory=list)  # (session, action) approved, not typed
     recent_blocks: dict[str, float] = field(default_factory=dict)
@@ -581,30 +582,58 @@ class Supervisor:
             return
         t = self.cfg.timing
         text = clean(ev.data.get("text", ""), 160)
-        if ev.kind is E.RATE_LIMIT and ev.data.get("resume_at"):
-            delay = max(30.0, ev.data["resume_at"] - self.now() + 60)
-        else:  # back off exponentially up to the cap; never give up (an outage can last an hour)
-            delay = min(t.capacity_first_delay_s * (2 ** min(st.capacity_tries, 20)), t.capacity_max_delay_s)
-            if ev.kind is E.RATE_LIMIT:
-                delay = max(delay, 300)
+        claude = self.cfg.agents[st.name].kind == "claude"
+        # back off exponentially up to the cap; never give up (an outage can last an hour)
+        delay = min(t.capacity_first_delay_s * (2 ** min(st.capacity_tries, 20)), t.capacity_max_delay_s)
+        resume_at = self._limit_lifts(st, ev) if ev.kind is E.RATE_LIMIT else None
+        if resume_at:  # Claude continues by itself when a plan limit lifts; `continue` is only the fallback
+            delay = max(30.0, resume_at - self.now() + (t.claude_limit_grace_s if claude else 60))
+        elif ev.kind is E.RATE_LIMIT:
+            delay = max(delay, 1800)
         st.capacity_tries += 1
         if st.capacity_tries == t.capacity_max_tries:
             self._spawn(self.notifier.notify(f"agent-watcher: {st.name}", f"Still failing after "
                                              f"{st.capacity_tries} retries, still retrying: {text[:100]}"), "notify")
-        then = "Switching model and sending" if self.cfg.codex_rotation and self.cfg.agents[st.name].kind == "codex" \
-            else "Sending"
+        then = "Switching model and sending" if self.cfg.codex_rotation and not claude else "Sending"
         per_hour = max(1, round(3600 / max(delay, 1)))
-        if st.capacity_tries <= 3 or st.capacity_tries % per_hour == 0:  # don't flood the channel in a long outage
+        if ev.kind is E.RATE_LIMIT:
+            limit = f"its {ev.data['limit']} limit" if ev.data.get("limit") else "a plan limit"
+            fallback = fmt_reset(self.now() + delay, self.now()).removeprefix("resets ")
+            if not resume_at:
+                plan = f"Reset time unknown; {then.lower()} `continue` in {round(delay / 60)} min."
+            elif claude:
+                plan = (f"Claude continues by itself then; if it hasn't by {fallback}, the watcher "
+                        "sends `continue`.")
+            else:
+                plan = f"{then} `continue` at {fallback}."
+            posted = (ev.data.get("limit"), resume_at)
+            if posted != st.limit_posted or not resume_at and st.capacity_tries % per_hour == 0:
+                st.limit_posted = posted
+                self._post(st.project, f"{st.name} hit {limit} ({fmt_reset(resume_at, self.now())}). {plan}")
+        elif st.capacity_tries <= 3 or st.capacity_tries % per_hour == 0:  # don't flood the channel in an outage
             self._post(st.project, f"{st.name}: turn stopped (\"{text}\"). {then} `continue` in {round(delay)}s "
                                    f"(try {st.capacity_tries}; retrying until it works).")
         st.retry_task = self._spawn(self._continue_after(st, ev.ts, delay, text, ev.source == "screen"),
                                     f"retry:{st.name}")
 
+    def _limit_lifts(self, st: AgentState, ev: Event) -> float | None:
+        """When a plan limit lifts: from the error text, else from the window the status line or rollout reported
+        (the one named, or else any that is used up)."""
+        now = self.now()
+        if (at := ev.data.get("resume_at")) and at > now:
+            return at
+        name = ev.data.get("limit") or ""
+        keys = {"weekly": ("week", "weekly"), "session": ("session",)}.get(name, (name,))
+        windows = [w for k, w in st.usage.windows.items() if k in keys] or \
+            [w for w in st.usage.windows.values() if w.left_pct == 0]
+        resets = [w.resets_at for w in windows if w.resets_at and w.resets_at > now]
+        return max(resets) if resets else None
+
     async def _continue_after(self, st: AgentState, err_ts: float, delay: float, text: str,
                               from_screen: bool = False) -> None:
         await asyncio.sleep(delay)
-        if st.last_working > err_ts or st.name not in self.agents or not self.active(st.name):
-            return  # someone already restarted the turn
+        if st.last_working > err_ts or not st.idle or st.name not in self.agents or not self.active(st.name):
+            return  # the turn restarted already (by someone, or by Claude itself when a plan limit lifts)
         why = f"after error: {text[:100]}"
         rot = self.cfg.codex_rotation
         if rot and self.cfg.agents[st.name].kind == "codex":
@@ -647,12 +676,15 @@ class Supervisor:
                 return
             st.recent_blocks[desc] = self.now()
         pr = self.policy.evaluate(a, tool_name, tool_input, ev.data.get("cwd", ""))
-        if st.name == self.gm(st.project):  # the GM doesn't approve itself; its prompts reach the owner in Slack
-            self.act.audit(st.name, f"approvals_{kind}", self.cfg.mode(f"approvals_{kind}"), "GM_OWN", desc,
-                           f"{pr.verdict.value}: {pr.rule}; left to the owner")
-            return
         reviewer = {"claude_auto_mode": "Claude auto mode", "codex_auto_review": "Codex auto-review"}.get(
             ev.data.get("reviewer", ""), "a permission dialog" if kind == "dialog" else "the reviewer")
+        if st.name == self.gm(st.project):  # the GM doesn't approve itself
+            if self.cfg.mode("gm_assess") == "off" or pr.verdict in (Verdict.OWNER, Verdict.REFUSE):
+                self.act.audit(st.name, f"approvals_{kind}", self.cfg.mode(f"approvals_{kind}"), "GM_OWN", desc,
+                               f"{pr.verdict.value}: {pr.rule}; left to the owner")
+                return
+            await self._gm_request(st, ev, kind, desc, reviewer)
+            return
         p = Pending(self._new_id(), st.name, st.project, kind, desc, pr.rule,
                     owner_only=pr.verdict in (Verdict.OWNER, Verdict.REFUSE), created=self.now(),
                     session=st.session_id)
@@ -690,8 +722,39 @@ class Supervisor:
         elif pr.verdict is Verdict.OWNER:
             await self.notifier.notify(f"agent-watcher: {st.name}", f"Needs your decision: {desc[:120]}")
 
+    async def _gm_request(self, st: AgentState, ev: Event, kind: str, desc: str, reviewer: str) -> None:
+        """The GM's own request: the second opinion rules. "Looks project-related" approves it; anything else (or
+        no answer) leaves it to the owner, in the channel."""
+        p = Pending(self._new_id(), st.name, st.project, kind, desc, "gm_own", owner_only=True, created=self.now(),
+                    session=st.session_id)
+        reason = clean(ev.data.get("reason", ""), 300)
+        mode = self.cfg.mode("gm_assess")
+        text = await self._assess(p, self.cfg.agents[st.name], reviewer, reason)
+        head = f"[{self._qualified(p.id)}] {st.name} (GM) blocked by {reviewer}: {desc}."
+        if reason:
+            head += f" Reason: {reason.rstrip('.')}."
+        head += f" Second opinion ({self.cfg.assess.model}): " + \
+            (text.rstrip(".") + "." if text else "no answer.")
+        if text and text.lower().startswith("looks project-related"):
+            if mode == "live":
+                p.resolved = "approved"
+                self.act.audit(st.name, f"approvals_{kind}", self.cfg.mode(f"approvals_{kind}"), "APPROVED", desc,
+                               f"by the second opinion: {text}")
+                done = await self._execute(p, approve=True)
+                if self.cfg.mode(f"approvals_{kind}") != "live":
+                    done += f" ({self.cfg.mode(f'approvals_{kind}')} mode: nothing typed)"
+                p.thread_ts = await self.say(st.project, f"{head} Approved by the second opinion; {done}.")
+                if kind == "block":  # a refused retry is reported in this thread
+                    st.approved_blocks[desc] = (self.now(), p.id, p.thread_ts)
+                return
+            self.act.audit(st.name, "gm_assess", mode, "WOULD_APPROVE", desc, text)
+        self.pending[p.id] = p
+        await self._post_pending(p, head)
+        self._save_state()
+        await self.notifier.notify(f"agent-watcher: {st.name}", f"GM needs your decision: {desc[:120]}")
+
     async def _assess(self, p: Pending, a, reviewer: str, reason: str) -> str | None:
-        """A one-line second opinion from a small model. Advisory only."""
+        """A one-line second opinion from a small model: advisory, except on the GM's own requests."""
         text = await self.assessor(agent=p.agent, clone=str(a.clone), state=str(self.cfg.project_state_dir),
                                    reviewer=reviewer, reason=reason, action=p.desc)
         if text:

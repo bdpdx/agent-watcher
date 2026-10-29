@@ -20,6 +20,7 @@ cohort_restart = "dry"
 cant_continue = "dry"
 usage_check = "dry"
 assess = "off"                 # a one-line second opinion from a small model in each request's thread
+gm_assess = "off"              # the second opinion rules on the GM's own requests; otherwise they go to the owner
 cyber_switch = "dry"
 
 # Agents of these kinds are managed even when they haven't joined a watched project (no Slack needed). Each is
@@ -55,7 +56,8 @@ report_left_pct = [25, 15, 10, 5]
 # relaunched as `<script> '<start prompt>'`; the script sets the agent's home and repo. Otherwise the watcher
 # rebuilds the command from the running process. agents.toml `launch` overrides both.
 # The second opinion on requests (mode "assess"): `claude -p` on the user's own Claude login, with no tools, MCP
-# servers, settings or hooks. Advisory only: posted in the request's thread, never typed or acted on.
+# servers, settings or hooks. For other agents' requests it is advisory (posted for the GM). With gm_assess it rules
+# on the GM's own requests: "Looks project-related" approves; anything else goes to the owner. Its text is never typed.
 [assess]
 model = "claude-haiku-5-5"
 # claude = "claude"            # the CLI
@@ -67,6 +69,7 @@ model = "claude-haiku-5-5"
 [timing]
 capacity_first_delay_s = 30   # doubles on each consecutive retry
 capacity_max_tries = 5
+claude_limit_grace_s = 300     # after a plan limit resets, Claude continues by itself; else `continue` then
 gm_answer_timeout_s = 900       # then the owner gets a macOS notification
 cohort_restart_scheduled = false  # true: the watcher hosting the GM asks it for a cohort restart on this schedule
 cohort_restart_every_h = 12     # the schedule; also the period of the compaction counts

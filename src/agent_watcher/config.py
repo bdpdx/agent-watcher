@@ -16,7 +16,7 @@ Mode = Literal["off", "dry", "live"]
 
 # "channel" governs posting to Slack; the rest govern keystrokes.
 BEHAVIORS = ("channel", "capacity", "approvals_block", "approvals_dialog", "restart", "cohort_restart",
-             "cant_continue", "cyber_switch", "usage_check", "assess")
+             "cant_continue", "cyber_switch", "usage_check", "assess", "gm_assess")
 
 # Searches and reads that are never project work. Matched against the command and action summary.
 DEFAULT_REFUSE = [
@@ -68,6 +68,7 @@ class Timing:
     capacity_first_delay_s: float = 30
     capacity_max_tries: int = 5  # notify the owner after this many failed retries (retrying continues)
     capacity_max_delay_s: float = 600  # the retry delay doubles up to this; retries never stop
+    claude_limit_grace_s: float = 300  # after a plan limit lifts, Claude continues by itself; else `continue` then
     idle_wait_max_s: float = 20 * 60  # how long to wait for idle before typing anyway
     exit_timeout_s: float = 90
     online_timeout_s: float = 10 * 60  # how long a relaunched agent has to rejoin its project

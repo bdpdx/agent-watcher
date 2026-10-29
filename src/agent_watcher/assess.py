@@ -1,8 +1,9 @@
 """A one-line second opinion on a blocked action, from a small model through the `claude` CLI.
 
-Advisory only: the answer is posted in the request's thread for the GM and never decides anything or reaches a
-terminal. The CLI runs on the user's own Claude login (no API key) with no tools, MCP servers, settings or
-hooks, and keeps no session.
+For other agents' requests it is advisory: posted with the request for the GM, who decides. For the GM's own
+requests (mode gm_assess) it rules: "Looks project-related" approves, anything else leaves it to the owner. Its text
+never reaches a terminal. The CLI runs on the user's own Claude login (no API key) with no tools, MCP servers,
+settings or hooks, and keeps no session.
 """
 
 from __future__ import annotations
@@ -18,8 +19,8 @@ from .templates import clean
 
 log = logging.getLogger(__name__)
 
-PROMPT = """You give a software project's GM a quick second opinion on one action an AI coding agent was \
-blocked from doing. The GM decides; you only advise.
+PROMPT = """You give a quick second opinion on one action an AI coding agent on a software project was blocked \
+from doing, or asked permission for.
 
 Answer in ONE line under 40 words. Start with exactly one of: "Looks project-related", "Outside the project", \
 "Unclear". Then say why.

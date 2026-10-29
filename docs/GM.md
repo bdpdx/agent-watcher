@@ -21,8 +21,10 @@ still restart or move it. Watchers say `Now watching <agent>` and `No longer wat
 - **Refused actions**: matched a refuse rule (broad searches outside the workspace, credential stores, sudo,
   other users' files…). Only the owner can override these. **Owner-only** items (e.g. prod resets) also go
   to the owner.
-- Your own blocked actions and permission dialogs are not posted: they reach the owner through your own Slack
-  approvals, and the watcher's audit log records them. You don't approve yourself.
+- Your own blocked actions and permission dialogs are decided by the second opinion (below), not by you. When it
+  says "Looks project-related", the watcher approves and posts that; otherwise (or with no answer) it posts the
+  request as owner-only for the owner. Ones refused or owner-only by rule go straight to the owner. Without
+  `gm_assess` on, they aren't posted: they reach the owner through your own Slack approvals.
 - **Capacity / disconnect retries**, **safety refusals**, **session refusals and recovery relaunches**. On a Codex
   cybersecurity block the watcher switches the agent to the cybersecurity model, asks it to continue, and switches
   it back after its next successful turn; it posts each step. If the agent is blocked again before a successful turn,
@@ -33,7 +35,8 @@ still restart or move it. Watchers say `Now watching <agent>` and `No longer wat
 ## Deciding a blocked action
 
 Each request also gets a one-line **second opinion** in its thread from a small model ("Looks project-related",
-"Outside the project" or "Unclear", and why). It's advisory: it never decides, and it can be wrong. You decide.
+"Outside the project" or "Unclear", and why). For other agents' requests it's advisory and can be wrong: you
+decide.
 Writes outside the project's folders (the agent's clone and worktrees, project-state, its own home, temporary
 folders) are refused by rule, like credential stores and broad searches; only the owner can override those.
 

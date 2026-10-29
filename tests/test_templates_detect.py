@@ -130,3 +130,12 @@ def test_line_breaks_are_shown_as_command_separators():
     cmd = "git push -u origin feat\n gh repo view --json isPrivate\ncd x &&\n  make \\\n  test | \n tail -2"
     assert describe_action("Bash", {"command": ["/opt/homebrew/bin/bash", "-lc", cmd]}) == \
         "the command `git push -u origin feat; gh repo view --json isPrivate; cd x && make test | tail -2`"
+
+
+def test_reset_time_with_a_date_or_a_time_zone():
+    now = dt.datetime(2026, 10, 23, 22, 53, tzinfo=dt.timezone.utc)
+    t = dt.datetime.fromtimestamp(reset_time("resets Oct 30 at 4am", now.astimezone()))
+    assert (t.month, t.day, t.hour) == (10, 30, 4)
+    la = reset_time("You've hit your weekly limit · resets 4am (America/Los_Angeles)", now)
+    assert dt.datetime.fromtimestamp(la, dt.timezone.utc) == dt.datetime(2026, 10, 24, 11, 0, tzinfo=dt.timezone.utc)
+    assert reset_time("resets Thu 4am", now) is None  # a weekday: the status line's window says when

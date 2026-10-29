@@ -9,6 +9,7 @@ import datetime as dt
 import json
 import re
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .events import E, Event
 from .usage import codex_rate_limits
@@ -24,7 +25,11 @@ CAPACITY = re.compile(
     re.I,
 )
 RATE_LIMIT = re.compile(r"hit your .*limit|rate.?limit|usage limit|\b429\b", re.I)
-RESET_AT = re.compile(r"(?:resets|try again at|reset at|available again at)\s+(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m", re.I)
+# "resets 3:45pm", "resets 4am (America/Los_Angeles)", "resets Oct 30 at 4am", "resets Oct 30, 4am"
+RESET_AT = re.compile(r"(?:resets|try again at|reset at|available again at)\s+(?:([a-z]{3})[a-z]*\.? (\d{1,2}),?(?: at)?\s+)?"
+                      r"(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m(?:\s*\(([\w/+-]+)\))?", re.I)
+LIMIT_NAME = re.compile(r"hit your (\w+) limit", re.I)  # "session", "weekly", or a model's weekly limit ("Fable")
+_MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
 
 CLAUDE_ERROR_CAPACITY = {"overloaded", "server_error", "unknown"}
 CODEX_ERROR_CAPACITY = {"server_overloaded", "internal_server_error", "response_stream_disconnected",
@@ -45,16 +50,35 @@ def iso_ts(s: str | None) -> float | None:
 
 
 def reset_time(text: str, now: dt.datetime | None = None) -> float | None:
-    """Epoch seconds of the next "resets 3:45pm" in local time, or None."""
+    """Epoch seconds of the next "resets 3:45pm" (or "resets Oct 30 at 4am"), in the time zone it names, else local
+    time; None if there is none."""
     m = RESET_AT.search(text)
-    if not m:
+    if not m or (m.group(1) and m.group(1).lower() not in _MONTHS):
         return None
     now = now or dt.datetime.now().astimezone()
-    hour = int(m.group(1)) % 12 + (12 if m.group(3).lower() == "p" else 0)
-    at = now.replace(hour=hour, minute=int(m.group(2) or 0), second=0, microsecond=0)
+    if m.group(6):
+        try:
+            now = now.astimezone(ZoneInfo(m.group(6)))
+        except (ZoneInfoNotFoundError, ValueError):
+            pass
+    hour = int(m.group(3)) % 12 + (12 if m.group(5).lower() == "p" else 0)
+    try:
+        at = now.replace(hour=hour, minute=int(m.group(4) or 0), second=0, microsecond=0)
+        if m.group(1):
+            at = at.replace(month=_MONTHS.index(m.group(1).lower()) + 1, day=int(m.group(2)))
+            if at < now - dt.timedelta(days=1):
+                at = at.replace(year=at.year + 1)
+            return at.timestamp()
+    except ValueError:
+        return None
     if at <= now:
         at += dt.timedelta(days=1)
     return at.timestamp()
+
+
+def limit_name(text: str) -> str | None:
+    m = LIMIT_NAME.search(text)
+    return m.group(1).lower() if m else None
 
 
 def classify_error_text(text: str, error_type: str | None, agent: str | None, source: str,
@@ -65,7 +89,8 @@ def classify_error_text(text: str, error_type: str | None, agent: str | None, so
     if SAFETY.search(text) or error_type in ("refusal", "safety") or error_type in CODEX_SAFETY_TYPES:
         return Event(E.SAFETY_FLAG, agent, {"text": text}, source=source)
     if error_type == "rate_limit" or error_type == "usage_limit_exceeded" or RATE_LIMIT.search(text):
-        return Event(E.RATE_LIMIT, agent, {"text": text, "resume_at": reset_time(text)}, source=source)
+        return Event(E.RATE_LIMIT, agent, {"text": text, "resume_at": reset_time(text), "limit": limit_name(text)},
+                     source=source)
     if (error_type in capacity_types) or CAPACITY.search(text):
         return Event(E.CAPACITY, agent, {"text": text, "error": error_type}, source=source)
     return None
