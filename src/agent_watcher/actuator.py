@@ -300,7 +300,10 @@ class Actuator:
             await self._wait_owner_quiet(agent)
             if not self.term.bound(agent):  # it exited while we waited
                 return None
-            ok, detail, windows = await self._usage_screen(agent)
+            try:
+                ok, detail, windows = await self._usage_screen(agent)
+            except RuntimeError as e:  # the pane closed, unbound, or went into copy mode mid-read
+                ok, detail, windows = False, str(e), {}
         self.audit(agent, behavior, mode, "USAGE_READ" if ok else "USAGE_READ_FAILED", detail)
         return windows if ok else None
 

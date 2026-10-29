@@ -213,6 +213,17 @@ async def test_usage_reader_never_types_into_a_shell(tmp_path):
     assert "claude-a" not in tui.sent
 
 
+async def test_usage_reader_gives_up_when_the_terminal_goes_away_mid_read(tmp_path):
+    """The pane unbinds after the prompt box was checked: a failed read, not a crashed task."""
+    class Vanishing(FakeClaudeTUI):
+        async def send_raw(self, agent, data):
+            raise RuntimeError(f"no terminal bound for {agent}")
+
+    tui = Vanishing()
+    cfg, sup, _ = make_sup(tmp_path, tui, ("claude-a",))
+    assert await sup.act.claude_usage("claude-a", "usage_check") is None
+
+
 async def test_usage_reader_never_touches_a_working_session(tmp_path):
     tui = FakeClaudeTUI(working=True)
     cfg, sup, _ = make_sup(tmp_path, tui, ("claude-a",))
