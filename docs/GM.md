@@ -29,6 +29,10 @@ still restart or move it. Watchers say `Now watching <agent>` and `No longer wat
   cybersecurity block the watcher switches the agent to the cybersecurity model, asks it to continue, and switches
   it back after its next successful turn; it posts each step. If the agent is blocked again before a successful turn,
   it's yours to handle.
+- **Usage**: each agent's plan limits (session, week, per-model week) when it joins, and every agent's again
+  (`Usage, for <gm>: …`) about a minute after you join or post `gm <your name>`, so a fresh session sees them
+  without reading back.
+  After that, only when a window gets low (25/15/10/5% left) or resets.
 - **Restart progress**, a hello line when a watcher comes online (`agent-watcher-a online: watching …`),
   and `cohort done: …` reports.
 

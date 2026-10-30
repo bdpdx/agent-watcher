@@ -127,6 +127,7 @@ class WatcherConfig:
     codex_cyber: ModelRotation | None = None  # [codex_cyber]: the model a Codex agent moves to after a cyber block
     usage_report_left_pct: list[int] = field(default_factory=lambda: [25, 15, 10, 5])  # [usage] report_left_pct
     usage_intro_wait_s: float = 15 * 60  # post the join line with what's known after this long
+    gm_usage_delay_s: float = 60  # when the GM joins, wait this long for readings, then post every agent's usage
     assess: "AssessConfig" = field(default_factory=lambda: AssessConfig())  # [assess]: second opinion on requests
     start_script: str | None = None  # [launch] start_script, e.g. "~/.bin/start-{agent}": relaunch through it
 

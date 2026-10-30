@@ -472,6 +472,27 @@ async def test_restart_waits_for_the_new_session_to_register(world):
     assert "codex-a restarted." in w.chan.texts(P1)
 
 
+async def test_restarted_agent_posts_its_usage_line_again(world):
+    """The new session is seen before it joins (as in real restarts); once it joins, its usage line is posted."""
+    from agent_watcher.usage import Window
+    w = await world()
+    w.term.prompt_box = True
+    st = w.sup.agents["codex-a"]
+    st.usage.windows["weekly"] = Window(30, w.sup.now() + 86400, w.sup.now())
+    st.usage.introduced = True  # its line was posted when it first joined
+    await w.sup.handle(Event(E.IDLE, "codex-a", source="rollout"))
+    await w.sup.handle(msg("restart codex-a"))
+    await asyncio.sleep(0.15)
+    w.set("codex-a", project=None, session="s2")  # new session, not registered yet
+    w.scan()
+    await relaunch_registers(w, "codex-a", P1, after=0)
+    await settle(30)
+    await w.sup.tick()
+    await settle()
+    texts = w.chan.texts(P1)
+    assert "codex-a restarted." in texts and any(t.startswith("codex-a usage: weekly 70% left") for t in texts)
+
+
 async def test_restart_that_never_rejoins_is_reported(world):
     w = await world()
     await w.sup.handle(Event(E.IDLE, "codex-a", source="rollout"))
@@ -878,3 +899,70 @@ async def test_claude_already_working_after_the_limit_gets_no_continue(world):
     st.idle = False
     await w.sup._continue_after(st, err_ts=w.sup.now() + 10, delay=0, text="limit")
     assert w.term.sent.get("claude-a") is None
+
+
+# ---- usage for a GM that just joined ---------------------------------------------------------------
+
+def usage_world_windows(w):
+    from agent_watcher.usage import Window
+    for task in w.sup.gm_usage_task.values():  # the initial scan's (the GM joined), still waiting out its delay
+        task.cancel()
+    w.sup.gm_usage_task.clear()
+    for n in ("claude-a", "codex-a", "codex-g"):
+        st = w.sup.agents[n]
+        key = "weekly" if n.startswith("codex") else "week"
+        st.usage.windows[key] = Window(40, w.sup.now() + 86400, w.sup.now())
+        st.usage.introduced, st.usage_posted = True, w.sup.now() - 3600  # posted an hour ago
+
+
+async def test_usage_is_posted_again_when_the_gm_rejoins_here(world):
+    w = await world()
+    w.cfg.gm_usage_delay_s = 0
+    usage_world_windows(w)
+    w.set("claude-a", project=None, session="s9")  # the GM restarts: a new session, then it joins again
+    w.sup.agents["claude-a"].flow = asyncio.get_running_loop().create_future()  # mid-restart
+    w.scan()
+    w.set("claude-a", project=P1, session="s9")
+    w.scan()
+    await settle()
+    [text] = [t for t in w.chan.texts(P1) if t.startswith("Usage, for claude-a:")]
+    assert "claude-a usage: week 60% left" in text and "codex-a usage: weekly 60% left" in text
+    assert "codex-g usage:" in text
+
+
+async def test_usage_is_posted_when_another_watcher_reports_the_gm_back(world):
+    w = await world()
+    w.cfg.gm_usage_delay_s = 0
+    usage_world_windows(w)
+    peer = dict(tier=Tier.AGENT, sender="agent-watcher-z", is_bot=True)
+    await w.sup.handle(msg("codex-q restarted.", **peer))  # not the GM: nothing
+    await settle()
+    assert not any(t.startswith("Usage, for") for t in w.chan.texts(P1))
+    await w.sup.handle(msg("claude-a restarted.", **peer))
+    await w.sup.handle(msg("Now watching claude-a.", **peer))  # the same arrival: one post
+    await settle()
+    assert len([t for t in w.chan.texts(P1) if t.startswith("Usage, for claude-a:")]) == 1
+
+
+async def test_usage_already_posted_after_the_gm_arrived_is_not_repeated(world):
+    w = await world()
+    w.cfg.gm_usage_delay_s = 0.1
+    usage_world_windows(w)
+    w.sup._usage_for_gm(P1)
+    w.sup.agents["codex-a"].usage_posted = w.sup.now() + 1  # its own line went out in the meantime
+    await asyncio.sleep(0.2)
+    [text] = [t for t in w.chan.texts(P1) if t.startswith("Usage, for")]
+    assert "codex-a usage" not in text and "codex-g usage" in text
+
+
+async def test_usage_is_posted_when_the_gm_announces_itself(world):
+    w = await world()
+    w.cfg.gm_usage_delay_s = 0
+    usage_world_windows(w)
+    await w.sup.handle(msg("gm claude-a", sender="codex-q", tier=Tier.AGENT, is_bot=True))  # someone else: nothing
+    await settle()
+    assert not any(t.startswith("Usage, for") for t in w.chan.texts(P1))
+    await w.sup.handle(msg("gm claude-a"))  # the GM itself, joining the channel
+    await settle()
+    [text] = [t for t in w.chan.texts(P1) if t.startswith("Usage, for claude-a:")]
+    assert "codex-a usage" in text and w.sup.gm(P1) == "claude-a"

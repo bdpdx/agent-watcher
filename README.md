@@ -60,8 +60,9 @@ The watcher tracks each agent's plan limits without asking the agent:
   watcher types `/usage` into an idle Claude, reads it, and closes it with Esc. It does this daily below 50%
   used, then every 6h, 2h (80%), 1h (90%) and 30m (95%).
 
-It posts one usage line per agent when the agent joins (and in its `online` line), then stays quiet until a
-window has 25% or less left. After that it posts once at each of 25/15/10/5% left, and once when a reported
+It posts one usage line per agent when the agent joins (and in its `online` line), and every agent's line again
+about a minute after the GM joins (its `gm <itself>` post, its session joining here, another watcher's
+`<gm> restarted.` / `Now watching <gm>.`, or a new GM), since a fresh GM doesn't read the backlog. Then it stays quiet until a window has 25% or less left. After that it posts once at each of 25/15/10/5% left, and once when a reported
 window resets.
 
 ## What it does

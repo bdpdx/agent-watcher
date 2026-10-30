@@ -91,6 +91,7 @@ class AgentState:
     retry_task: asyncio.Task | None = None
     usage: AgentUsage = field(default_factory=AgentUsage)
     usage_since: float = 0  # when its usage join line became due (attach or new session)
+    usage_posted: float = 0  # when its usage was last posted in full (join line, online line, or for the GM)
     usage_task: asyncio.Task | None = None  # a /usage read in progress
 
     def busy(self) -> bool:
@@ -122,6 +123,11 @@ _PENDING_SAVED = ("id", "agent", "project", "kind", "desc", "rule", "owner_only"
 # "[<name>/B-0142] …".
 _PEER_POST = re.compile(r"^(?:(\S+) online: watching |cohort done: (\S+) restarted |\[([a-z0-9][a-z0-9_-]*)/[A-Z]-\d+\])",
                         re.I)
+
+
+# Another watcher's posts that mean an agent just joined the project: "<agent> restarted.", "<agent> moved to <p>.",
+# "Now watching <agent>."
+_PEER_ARRIVAL = re.compile(r"^(?:Now watching (\S+)\.|(\S+) (?:restarted|moved to \S+)\.)$")
 
 
 @dataclass
@@ -167,6 +173,7 @@ class Supervisor:
         self.last_gm: dict[str, str] = {}
         self.gm_announced: dict[str, str] = {}  # project -> GM named by a `gm <agent>` post; wins over gm.json
         self.gm_file_seen: dict[str, str | None] = {}  # project -> gm.json's GM when last read; a change there wins
+        self.gm_usage_task: dict[str, asyncio.Task] = {}  # project -> usage post due for a GM that just arrived
         # compaction baseline: per-agent counts in the current cohort cycle (the 12h schedule), logged at its end
         self.cycle_start, self.cycle_end = 0.0, 0.0
         self.cycle_compactions: dict[str, int] = {}
@@ -389,6 +396,8 @@ class Supervisor:
                 seen.add(reg.agent)
                 if new:
                     ch.attached.append(reg.agent)
+                    if reg.agent == self.gm(reg.project):
+                        self._usage_for_gm(reg.project)
                     if not st.busy():
                         if not same_session:
                             st.launched_at = 0
@@ -513,7 +522,7 @@ class Supervisor:
             u = self.agents[n].usage
             if u.windows:
                 lines.append(summary(n, u, self._usage_order(n), self.now()))
-                u.introduced = True
+                u.introduced, self.agents[n].usage_posted = True, self.now()
         await self.say(project, "\n".join(lines))
         for p in self.pending.values():
             if p.project == project and not p.resolved:
@@ -551,8 +560,29 @@ class Supervisor:
             return
         if not force and not self._usage_expected(st.name) <= set(u.windows):
             return
-        u.introduced = True
+        u.introduced, st.usage_posted = True, self.now()
         self._post(st.project, summary(st.name, u, self._usage_order(st.name), self.now()))
+
+    def _usage_for_gm(self, project: str) -> None:
+        """The GM just joined (here, through another watcher, or as a new GM). It doesn't read the channel's backlog,
+        so post every agent's usage again, once readings have had a moment to arrive."""
+        task = self.gm_usage_task.get(project)
+        if task and not task.done():
+            return
+        self.gm_usage_task[project] = self._spawn(self._post_usage_for_gm(project, self.now()),
+                                                  f"gm-usage:{project}")
+
+    async def _post_usage_for_gm(self, project: str, arrived: float) -> None:
+        await asyncio.sleep(self.cfg.gm_usage_delay_s)
+        due = [st for st in map(self.agents.get, self.in_project(project))
+               if st and st.usage.windows and st.status is Status.MANAGED and st.usage_posted < arrived]
+        if not due:
+            return  # posted since the GM arrived, or no readings yet (its own join line follows)
+        lines = [f"Usage, for {self.gm(project)}:"]
+        for st in due:
+            lines.append(summary(st.name, st.usage, self._usage_order(st.name), self.now()))
+            st.usage.introduced, st.usage_posted = True, self.now()  # this is its join line
+        await self.say(project, "\n".join(lines))
 
     def _usage_due(self, st: AgentState) -> bool:
         return (self.cfg.agents[st.name].kind == "claude" and self.cfg.mode("usage_check") != "off"
@@ -1147,6 +1177,9 @@ class Supervisor:
         st.compaction_floor, st.awaiting_floor = None, False
         st.context_reported.clear()
         st.launched_at = t1
+        # its usage line is due once it rejoins; attach() can't tell, since the new session is often seen (and its
+        # id taken) before it registers
+        st.usage.introduced, st.usage_since = False, t1
         joined = await self.wait_until(
             lambda: st.status is Status.MANAGED and st.project == project and st.session_id != old_session,
             t.online_timeout_s)
@@ -1276,6 +1309,7 @@ class Supervisor:
                 f" Pending: {', '.join(self._qualified(p.id) for p in open_items)}." if open_items else ""))
             self.last_gm[project] = gm
             self._save_state()
+            self._usage_for_gm(project)
 
     # ---- channel messages ---------------------------------------------------------------------------
 
@@ -1301,7 +1335,11 @@ class Supervisor:
         """`gm <agent>`: from the owner or an authorized human, the current GM handing over, or a cohort agent
         announcing itself. It names the GM until the next such post or a change to gm.json."""
         known = set(self.in_project(project)) | set().union(*self.peers.get(project, {}).values())
-        if not agent or agent == self.gm(project):
+        if agent and agent == self.gm(project):
+            if sender == agent or tier in (Tier.OWNER, Tier.AUTHORIZED_HUMAN, Tier.GM):
+                self._usage_for_gm(project)  # the GM announces itself when it joins
+            return
+        if not agent:
             return
         if tier in (Tier.OWNER, Tier.AUTHORIZED_HUMAN, Tier.GM):
             pass
@@ -1315,6 +1353,8 @@ class Supervisor:
 
     def _on_peer(self, project: str, sender: str, text: str, ts: float) -> None:
         body = text.strip()
+        if (m := _PEER_ARRIVAL.match(body)) and (m.group(1) or m.group(2)) == self.gm(project):
+            self._usage_for_gm(project)  # the GM joined through another watcher
         if m := _PEER_POST.match(body):
             name = (m.group(1) or m.group(2) or m.group(3)).lower()
             if name != self.channel.name.lower() and name not in self.peer_watchers.get(project, []):
