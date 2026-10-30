@@ -490,7 +490,23 @@ async def test_restarted_agent_posts_its_usage_line_again(world):
     await w.sup.tick()
     await settle()
     texts = w.chan.texts(P1)
-    assert "codex-a restarted." in texts and any(t.startswith("codex-a usage: weekly 70% left") for t in texts)
+    usage = next(i for i, t in enumerate(texts) if t.startswith("codex-a usage: weekly 70% left"))
+    assert texts.index("codex-a restarted.") < usage  # after it rejoins, not while it's relaunching
+
+
+async def test_no_usage_line_while_a_restarted_agent_is_still_relaunching(world):
+    from agent_watcher.usage import Window
+    w = await world()
+    w.term.prompt_box = True
+    st = w.sup.agents["codex-a"]
+    st.usage.windows["weekly"] = Window(30, w.sup.now() + 86400, w.sup.now())
+    st.usage.introduced = True
+    await w.sup.handle(Event(E.IDLE, "codex-a", source="rollout"))
+    await w.sup.handle(msg("restart codex-a"))
+    await asyncio.sleep(0.2)  # launched; the old session is still the one discovery knows
+    await w.sup.tick()
+    await settle()
+    assert not any(t.startswith("codex-a usage:") for t in w.chan.texts(P1))
 
 
 async def test_restart_that_never_rejoins_is_reported(world):

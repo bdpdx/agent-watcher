@@ -1208,12 +1208,11 @@ class Supervisor:
         st.compaction_floor, st.awaiting_floor = None, False
         st.context_reported.clear()
         st.launched_at = t1
-        # its usage line is due once it rejoins; attach() can't tell, since the new session is often seen (and its
-        # id taken) before it registers
-        st.usage.introduced, st.usage_since = False, t1
         joined = await self.wait_until(
             lambda: st.status is Status.MANAGED and st.project == project and st.session_id != old_session,
             t.online_timeout_s)
+        if joined:  # its usage line is due now; attach() can't tell, since the new session is often seen (and its id
+            st.usage.introduced, st.usage_since = False, self.now()  # taken) before it registers
         if not joined:
             await self.notifier.notify(f"agent-watcher: {agent}", f"Relaunched, but it hasn't joined {project}")
         st.last_restart = self.now()
