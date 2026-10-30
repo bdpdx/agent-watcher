@@ -33,7 +33,7 @@ from .discovery import AgentRecord
 from .events import E, Event, Tier
 from .policy import Policy, Verdict
 from .templates import T, clean, describe_action
-from .usage import LABELS, AgentUsage, fmt_reset, fmt_window, scrape_interval, summary, update
+from .usage import LABELS, AgentUsage, Window, fmt_reset, fmt_window, scrape_interval, summary, update
 
 log = logging.getLogger(__name__)
 
@@ -174,6 +174,7 @@ class Supervisor:
         self.gm_announced: dict[str, str] = {}  # project -> GM named by a `gm <agent>` post; wins over gm.json
         self.gm_file_seen: dict[str, str | None] = {}  # project -> gm.json's GM when last read; a change there wins
         self.gm_usage_task: dict[str, asyncio.Task] = {}  # project -> usage post due for a GM that just arrived
+        self.saved_usage: dict[str, dict] = {}  # agent -> its last usage readings, restored when it's seen again
         # compaction baseline: per-agent counts in the current cohort cycle (the 12h schedule), logged at its end
         self.cycle_start, self.cycle_end = 0.0, 0.0
         self.cycle_compactions: dict[str, int] = {}
@@ -215,6 +216,8 @@ class Supervisor:
         self.cycle_compactions = dict(cyc.get("counts", {}))
         back = raw.get("cyber_return")
         self.cyber_return = back if isinstance(back, dict) else {}
+        usage = raw.get("usage")
+        self.saved_usage = usage if isinstance(usage, dict) else {}
 
     def _save_state(self) -> None:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -222,11 +225,38 @@ class Supervisor:
                "seq": self.seq, "last_gm": self.last_gm, "gm_announced": self.gm_announced,
                "gm_file_seen": self.gm_file_seen, "peer_watchers": self.peer_watchers,
                "compaction_cycle": {"start": self.cycle_start, "end": self.cycle_end, "counts": self.cycle_compactions},
-               "cyber_return": self.cyber_return,
+               "cyber_return": self.cyber_return, "usage": self._usage_to_save(),
                "pending": [{k: getattr(p, k) for k in _PENDING_SAVED} for p in self.pending.values() if not p.resolved]}
         tmp = self.state_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(raw, indent=2))
         tmp.replace(self.state_path)
+
+    def _usage_to_save(self) -> dict[str, dict]:
+        """Each agent's latest readings (kept for agents not running now), so a restarted watcher can post usage
+        at once instead of waiting for a status line refresh or an idle /usage read."""
+        out = dict(self.saved_usage)
+        for name, st in self.agents.items():
+            if st.usage.windows:
+                out[name] = {"home": str(st.home), "next_scrape": st.usage.next_scrape,
+                             "windows": {k: [w.used_pct, w.resets_at, w.observed_at]
+                                         for k, w in st.usage.windows.items()}}
+        self.saved_usage = out
+        return out
+
+    def _restore_usage(self, st: AgentState) -> None:
+        saved = self.saved_usage.get(st.name)
+        if not isinstance(saved, dict) or saved.get("home") != str(st.home):
+            return
+        try:
+            windows = {key: Window(float(used), resets, observed)
+                       for key, (used, resets, observed) in (saved.get("windows") or {}).items()
+                       if resets and resets > self.now()}  # a window that has reset since says nothing about now
+            next_scrape = float(saved.get("next_scrape") or 0)
+        except (TypeError, ValueError):
+            log.warning("dropping unreadable saved usage for %s", st.name)
+            return
+        update(st.usage, windows, self.cfg.usage_report_left_pct)  # not introduced yet: records marks, posts nothing
+        st.usage.next_scrape = next_scrape
 
     # ---- helpers -------------------------------------------------------------------------------
 
@@ -334,6 +364,7 @@ class Supervisor:
         st = self.agents.get(name)
         if st is None:
             st = AgentState(name, project, rec.home)
+            self._restore_usage(st)
             self.agents[name] = st
         if st.usage_since == 0 or st.session_id != rec.session_id or st.project != project:
             st.usage.introduced, st.usage_since = False, self.now()  # joined: one usage line is due
@@ -1270,6 +1301,7 @@ class Supervisor:
     async def tick(self) -> None:
         """Once a minute: per-project schedules, GM changes, detached grace, the compaction cycle."""
         self._check_compaction_cycle()
+        self._save_state()  # with the latest usage readings
         for project in self.channel.projects():
             await self._check_gm_change(project)
             nxt = self.next_cohort_at.get(project, 0)

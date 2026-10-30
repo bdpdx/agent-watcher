@@ -966,3 +966,27 @@ async def test_usage_is_posted_when_the_gm_announces_itself(world):
     await settle()
     [text] = [t for t in w.chan.texts(P1) if t.startswith("Usage, for claude-a:")]
     assert "codex-a usage" in text and w.sup.gm(P1) == "claude-a"
+
+
+async def test_a_restarted_watcher_posts_usage_from_saved_readings(world):
+    from agent_watcher.usage import Window
+    w = await world()
+    now = w.sup.now()
+    a = w.sup.agents["claude-a"]
+    a.usage.windows.update(session=Window(10, now + 3600, now), week=Window(80, now + 86400, now),
+                           fable=Window(5, now + 86400, now), old=Window(99, now - 60, now - 7200))
+    w.sup.agents["codex-a"].usage.windows["weekly"] = Window(30, now + 86400, now)
+    await w.sup.tick()  # saves the readings
+    w2 = World(w.tmp)  # a new watcher on the same state_dir: it sees the same agents
+    await settle(3)
+    w2.chan.posts.clear()
+    w2.sup.gm_usage_task.clear()
+    a2 = w2.sup.agents["claude-a"]
+    assert set(a2.usage.windows) == {"session", "week", "fable"}  # "old" had reset already
+    await w2.sup.tick()  # the first tick posts each agent's line; it doesn't wait for fresh readings
+    await settle()
+    texts = w2.chan.texts(P1)
+    assert any(t.startswith("claude-a usage: session 90% left") and "week 20% left" in t for t in texts)
+    assert any(t.startswith("codex-a usage: weekly 70% left") for t in texts)
+    from agent_watcher.usage import update
+    assert update(a2.usage, {"week": Window(81, now + 86400, now + 1)}, w2.cfg.usage_report_left_pct) == []

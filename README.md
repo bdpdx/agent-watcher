@@ -62,7 +62,9 @@ The watcher tracks each agent's plan limits without asking the agent:
 
 It posts one usage line per agent when the agent joins (and in its `online` line), and every agent's line again
 about a minute after the GM joins (its `gm <itself>` post, its session joining here, another watcher's
-`<gm> restarted.` / `Now watching <gm>.`, or a new GM), since a fresh GM doesn't read the backlog. Then it stays quiet until a window has 25% or less left. After that it posts once at each of 25/15/10/5% left, and once when a reported
+`<gm> restarted.` / `Now watching <gm>.`, or a new GM), since a fresh GM doesn't read the backlog. The latest
+readings are kept in `state.json`, so a restarted watcher posts every agent's line within a minute instead of
+waiting for a status line refresh or an idle `/usage` read (windows that reset meanwhile are dropped). Then it stays quiet until a window has 25% or less left. After that it posts once at each of 25/15/10/5% left, and once when a reported
 window resets.
 
 ## What it does
