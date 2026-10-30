@@ -357,13 +357,29 @@ class Actuator:
             await asyncio.sleep(self.cfg.timing.menu_step_s)
 
     async def _select(self, agent: str, label: str) -> bool:
-        """Move a Codex menu's selection onto `label` with the arrow keys."""
-        for _ in range(20):
+        """Move a Codex menu's selection onto `label` with the arrow keys. A long menu shows only some of its items;
+        one that isn't showing is found by scrolling: down until it shows, the list wraps or the bottom is reached,
+        then up to the top."""
+        start = prev = None
+        key = DOWN
+        for _ in range(80):
             items = menu_items(await self.term.screen_text(agent))
             target = next((i for i, (lbl, _, _) in enumerate(items) if lbl == label), None)
             sel = next((i for i, (_, s, _) in enumerate(items) if s), None)
-            if target is None or sel is None:
+            if sel is None:
                 return False
+            if target is None:
+                now = items[sel][0]
+                if now == prev:  # stopped moving: the bottom (then try upward), or the top (then give up)
+                    if key == UP:
+                        return False
+                    key = UP
+                elif key == DOWN and now == start:
+                    return False  # wrapped around without finding it: it isn't in the list
+                start, prev = start or now, now
+                await self.term.send_raw(agent, key)
+                await asyncio.sleep(self.cfg.timing.menu_step_s)
+                continue
             if target == sel:
                 return True
             await self.term.send_raw(agent, DOWN if target > sel else UP)

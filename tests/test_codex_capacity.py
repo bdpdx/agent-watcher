@@ -38,14 +38,20 @@ EFFORTS = [("Low", "Fast responses with lighter reasoning"), ("Medium", "Balance
 class FakeCodexTUI(FakeTerminal):
     """Enough of Codex's composer and /model menus to drive them. Renders NULs where iTerm2 does."""
 
-    def __init__(self, effort="Medium", error=True):
+    def __init__(self, effort="Medium", error=True, models=None, rows=None, wrap=False):
         super().__init__()
+        self.wrap = wrap
         self.effort, self.error = effort, error
+        self.models, self.rows, self.top = models or MODELS, rows, 0  # rows: how many items show at once
         self.state, self.buf, self.sel, self.model = "composer", "", 0, "GPT-6.1-Sol"
 
     def _menu(self, title, items, current):
         out = [" ", f"  {title}", " "]
+        if self.rows:  # keep the selection in view, like Codex's scrolling list
+            self.top = min(max(self.top, self.sel - self.rows + 1), self.sel)
         for i, (label, desc) in enumerate(items):
+            if self.rows and not self.top <= i < self.top + self.rows:
+                continue
             mark = "›" if i == self.sel else " "
             cur = " (current)" if label == current else ""
             out.append(f"{mark}\x00{i + 1}.\x00{label}{cur}\x00\x00\x00{desc}")
@@ -53,7 +59,7 @@ class FakeCodexTUI(FakeTerminal):
 
     async def screen_text(self, agent):
         if self.state == "models":
-            return self._menu("Select Model and Effort", MODELS, self.model)
+            return self._menu("Select Model and Effort", self.models, self.model)
         if self.state == "efforts":
             return self._menu(f"Select Reasoning Level for {self.model}", EFFORTS, self.effort)
         top = "■ Selected model is at capacity. Please try a different model." if self.error else "• Done."
@@ -66,7 +72,7 @@ class FakeCodexTUI(FakeTerminal):
         if self.state == "composer":
             if data == "\r":
                 if self.buf == "/model":
-                    self.state, self.sel, self.buf = "models", 0, ""
+                    self.state, self.sel, self.top, self.buf = "models", 0, 0, ""
                 elif self.buf:
                     self.buf, self.error = "", False
             elif data == "\x7f" * len(data):
@@ -74,16 +80,16 @@ class FakeCodexTUI(FakeTerminal):
             else:
                 self.buf += data
             return
-        items = MODELS if self.state == "models" else EFFORTS
+        items = self.models if self.state == "models" else EFFORTS
         if data == "\x1b[B":
-            self.sel = min(self.sel + 1, len(items) - 1)
+            self.sel = (self.sel + 1) % len(items) if self.wrap else min(self.sel + 1, len(items) - 1)
         elif data == "\x1b[A":
-            self.sel = max(self.sel - 1, 0)
+            self.sel = (self.sel - 1) % len(items) if self.wrap else max(self.sel - 1, 0)
         elif data == "\x1b":
             self.state = "composer" if self.state == "models" else "models"
         elif data == "\r" and self.state == "models":
-            self.model = MODELS[self.sel][0]
-            self.state, self.sel = "efforts", [e for e, _ in EFFORTS].index(self.effort)
+            self.model = self.models[self.sel][0]
+            self.state, self.sel, self.top = "efforts", [e for e, _ in EFFORTS].index(self.effort), 0
         elif data == "s" and self.state == "efforts":
             self.effort, self.state = EFFORTS[self.sel][0], "composer"
 
@@ -285,6 +291,47 @@ def test_status_line_effort():
     assert codex_status_effort(IDLE_ERROR) == "Medium"
     assert codex_status_effort(STATUS.format(effort="xhigh")) == "Extra high"
     assert codex_status_effort("› Ask Codex\n  GPT-6.1-Sol default · ~/code/x · Context 0% used") is None
+
+
+# The /model list as of 2026-10-30: Daybreak Blue is ninth, below the part of a short menu that shows at first.
+LONG_MODELS = [(m, "") for m in ("GPT-6.1-Sol", "GPT-6-Astra", "GPT-6.1 Terra", "GPT-6-Sol", "GPT-6-Luna",
+                                 "GPT-5.6-Sol", "GPT-5.6-Terra", "GPT-5.6-Luna", "Daybreak Blue")]
+
+
+async def test_select_scrolls_a_long_menu_to_an_item_off_screen(tmp_path):
+    tui = FakeCodexTUI(models=LONG_MODELS, rows=5)
+    cfg, act, _ = make(tmp_path, tui)
+    tui.state = "models"
+    from agent_watcher.detect import menu_items
+    assert [lbl for lbl, _, _ in menu_items(await tui.screen_text("codex-g"))][-1] == "GPT-6-Luna"  # 5 of 9 show
+    assert await act._select("codex-g", "Daybreak Blue") and LONG_MODELS[tui.sel][0] == "Daybreak Blue"
+    assert await act._select("codex-g", "GPT-6-Astra") and tui.sel == 1  # back up, onto one that shows
+
+
+async def test_select_gives_up_on_a_model_not_in_the_menu(tmp_path):
+    tui = FakeCodexTUI(models=LONG_MODELS, rows=5)
+    cfg, act, _ = make(tmp_path, tui)
+    tui.state = "models"
+    assert not await act._select("codex-g", "GPT-9") and tui.sel == 0  # down to the bottom, back up to the top
+
+
+async def test_select_in_a_long_menu_that_wraps(tmp_path):
+    tui = FakeCodexTUI(models=LONG_MODELS, rows=5, wrap=True)
+    cfg, act, _ = make(tmp_path, tui)
+    tui.state = "models"
+    assert await act._select("codex-g", "Daybreak Blue") and LONG_MODELS[tui.sel][0] == "Daybreak Blue"
+    assert await act._select("codex-g", "GPT-6-Astra") and tui.sel == 1
+    assert not await act._select("codex-g", "GPT-9")  # one full lap, then it stops
+
+
+async def test_cyber_switch_finds_daybreak_in_a_long_menu(tmp_path):
+    tui = FakeCodexTUI(effort="Medium", error=False, models=LONG_MODELS, rows=8)
+    cfg, sup = supervisor(tmp_path, tui)
+    cfg.codex_cyber = CYBER
+    [ev] = from_codex_main_line(task_complete("cyber_policy", "flagged for possible cybersecurity risk"), "codex-g")
+    await sup.handle(ev)
+    await settle(40)
+    assert tui.model == "Daybreak Blue" and tui.effort == "Medium"
 
 
 async def test_cyber_block_switches_to_daybreak_once(tmp_path):
