@@ -23,7 +23,9 @@ still restart or move it. Watchers say `Now watching <agent>` and `No longer wat
   to the owner.
 - Your own blocked actions and permission dialogs are decided by the second opinion (below), not by you. When it
   says "Looks project-related", the watcher approves and posts that; otherwise (or with no answer) it posts the
-  request as owner-only for the owner. Ones refused or owner-only by rule go straight to the owner. Without
+  request as owner-only for the owner; that request closes when the same action is asked again, or after 15 minutes
+  with no decision (you will have moved on; if you still need it, you'll be blocked again). Ones refused or
+  owner-only by rule go straight to the owner. Without
   `gm_assess` on, they aren't posted: they reach the owner through your own Slack approvals.
 - **Capacity / disconnect retries**, **safety refusals**, **session refusals and recovery relaunches**. On a Codex
   cybersecurity block the watcher switches the agent to the cybersecurity model, asks it to continue, and switches

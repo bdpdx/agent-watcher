@@ -88,6 +88,7 @@ class Timing:
     cant_continue_window_s: float = 45 * 60
     careful_sync_timeout_s: float = 15 * 60
     gm_answer_timeout_s: float = 15 * 60  # then the owner is notified
+    gm_request_expiry_s: float = 15 * 60  # the GM's own requests waiting on the owner close after this
     owner_typing_grace_s: float = 15  # don't type into a tab the owner typed in this recently
     draft_watch_s: float = 5  # a draft in the prompt box must sit unchanged, untouched, this long before it's moved aside
     submit_delay_s: float = 0.15
@@ -96,6 +97,8 @@ class Timing:
     screen_poll_s: float = 2  # how often Codex screens are read for capacity errors
     menu_step_s: float = 0.4  # pause between keystrokes in Codex's /model menus
     menu_timeout_s: float = 5  # how long a /model menu has to appear before the switch backs out
+    menu_close_timeout_s: float = 60  # how long the effort menu has to close: it waits on the app server, which
+    # can be slow exactly when a capacity or routing error has just happened
 
 
 @dataclass

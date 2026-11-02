@@ -38,9 +38,9 @@ EFFORTS = [("Low", "Fast responses with lighter reasoning"), ("Medium", "Balance
 class FakeCodexTUI(FakeTerminal):
     """Enough of Codex's composer and /model menus to drive them. Renders NULs where iTerm2 does."""
 
-    def __init__(self, effort="Medium", error=True, models=None, rows=None, wrap=False):
+    def __init__(self, effort="Medium", error=True, models=None, rows=None, wrap=False, slow_close=0):
         super().__init__()
-        self.wrap = wrap
+        self.wrap, self.slow_close, self.closing = wrap, slow_close, 0  # slow_close: reads the effort menu lingers
         self.effort, self.error = effort, error
         self.models, self.rows, self.top = models or MODELS, rows, 0  # rows: how many items show at once
         self.state, self.buf, self.sel, self.model = "composer", "", 0, "GPT-6.1-Sol"
@@ -58,6 +58,11 @@ class FakeCodexTUI(FakeTerminal):
         return "\n".join(out + [" ", "  enter select · esc back"])
 
     async def screen_text(self, agent):
+        if self.closing:
+            self.closing -= 1
+            if not self.closing:
+                self.state = "composer"
+            return self._menu(f"Select Reasoning Level for {self.model}", EFFORTS, self.effort)
         if self.state == "models":
             return self._menu("Select Model and Effort", self.models, self.model)
         if self.state == "efforts":
@@ -91,12 +96,16 @@ class FakeCodexTUI(FakeTerminal):
             self.model = self.models[self.sel][0]
             self.state, self.sel, self.top = "efforts", [e for e, _ in EFFORTS].index(self.effort), 0
         elif data == "s" and self.state == "efforts":
-            self.effort, self.state = EFFORTS[self.sel][0], "composer"
+            self.effort = EFFORTS[self.sel][0]
+            if self.slow_close:
+                self.closing = self.slow_close
+            else:
+                self.state = "composer"
 
 
 def make(tmp_path, tui, mode="live"):
     cfg = make_cfg(tmp_path, mode)
-    cfg.timing.menu_step_s, cfg.timing.menu_timeout_s = 0, 0.1
+    cfg.timing.menu_step_s, cfg.timing.menu_timeout_s, cfg.timing.menu_close_timeout_s = 0, 0.1, 0.3
     cfg.local_kinds = ["codex"]
     cfg.codex_rotation = ROT
     act = Actuator(cfg, tui, cfg.state_dir / "audit.log")
@@ -216,6 +225,27 @@ async def test_screen_capacity_switches_model_then_continues(tmp_path):
     assert [a["action"] for a in audit(cfg)][-2:] == ["MODEL_SWITCH", "CONTINUE"]
 
 
+async def test_failed_switch_still_continues_from_a_clean_prompt_box(tmp_path):
+    tui = FakeCodexTUI(slow_close=10**9)  # the effort menu outlasts the wait (Codex's server is slow)...
+    cfg, sup = supervisor(tmp_path, tui)
+    cfg.timing.menu_close_timeout_s = 0.05
+    real_send = tui.send_raw
+
+    async def send(agent, data):
+        if data == "\x1b" and tui.closing:  # ...and the Esc lands as it closes, with the change applied
+            tui.closing, tui.state = 0, "composer"
+            tui.sent.setdefault(agent, []).append(data)
+            return
+        await real_send(agent, data)
+    tui.send_raw = send
+    await sup.handle(Event(E.CAPACITY, "codex-g", {"text": "workspace routing discovery timed out"}, source="rollout"))
+    await settle(40)
+    assert tui.sent["codex-g"][-2:] == ["continue", "\r"]
+    actions = [a["action"] for a in audit(cfg)]
+    assert actions[-2:] == ["MODEL_SWITCH_FAILED", "CONTINUE"] and "continue anyway" in audit(cfg)[-1]["why"]
+    assert not sup.notifier.notes
+
+
 async def test_failed_switch_types_no_continue(tmp_path):
     tui = FakeCodexTUI()
     tui.buf = "draft"
@@ -322,6 +352,31 @@ async def test_select_in_a_long_menu_that_wraps(tmp_path):
     assert await act._select("codex-g", "Daybreak Blue") and LONG_MODELS[tui.sel][0] == "Daybreak Blue"
     assert await act._select("codex-g", "GPT-6-Astra") and tui.sel == 1
     assert not await act._select("codex-g", "GPT-9")  # one full lap, then it stops
+
+
+async def test_effort_menu_that_closes_slowly_still_counts(tmp_path):
+    tui = FakeCodexTUI(slow_close=5)  # Codex was slow, as on 2026-10-30 with "workspace routing" timeouts
+    cfg, act, _ = make(tmp_path, tui)
+    cfg.timing.menu_step_s = 0.02
+    assert await act.codex_switch_model("codex-g", "capacity", ROT)
+    assert tui.effort == "High" and tui.state == "composer" and "\x1b" not in tui.sent["codex-g"]
+
+
+async def test_backing_out_never_sends_esc_to_the_prompt_box(tmp_path):
+    tui = FakeCodexTUI(slow_close=10**9)  # the effort menu outlasts the wait...
+    cfg, act, _ = make(tmp_path, tui)
+    cfg.timing.menu_close_timeout_s = 0.05
+    real_send = tui.send_raw
+
+    async def send(agent, data):
+        if data == "\x1b":
+            tui.closing = 0  # ...then closes just before the back-out
+            tui.state = "composer"
+        await real_send(agent, data)
+    tui.send_raw = send
+    assert not await act.codex_switch_model("codex-g", "capacity", ROT)
+    assert tui.sent["codex-g"].count("\x1b") == 1  # one Esc closed the menu; none went into the prompt box
+    assert audit(cfg)[-1]["detail"].startswith("the effort menu did not close (screen: ")
 
 
 async def test_cyber_switch_finds_daybreak_in_a_long_menu(tmp_path):

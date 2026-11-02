@@ -124,3 +124,11 @@ def cfg(tmp_path):
         r = record(tmp_path, name, P1)
         c.agents[name] = c.agent_config(name, r.kind, r.home, r.cwd, r.launch_command())
     return c
+
+
+@pytest.fixture(autouse=True)
+def no_quarantine(monkeypatch):
+    """Tests never look at this machine's real codex/claude binaries; a test can set its own."""
+    async def clear(command):
+        return None
+    monkeypatch.setattr("agent_watcher.supervisor.quarantined_binary", clear)

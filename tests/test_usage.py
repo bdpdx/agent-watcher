@@ -1,6 +1,7 @@
 """Plan usage limits: parsing (rollouts, status line, /usage screen), crossings, cadence, reporting, the reader."""
 
 import datetime as dt
+import asyncio
 import json
 from pathlib import Path
 
@@ -299,3 +300,45 @@ def test_control_commands_find_the_socket_in_the_configs_state_dir(tmp_path, mon
     cfg.write_text(f'state_dir = "{tmp_path / "state"}"\n')
     assert cli.main(["status", "--config", str(cfg)]) == 1
     assert str(tmp_path / "state" / "watcher.sock") in capsys.readouterr().err
+
+
+async def test_usage_reader_keeps_the_screen_when_the_suggestion_doesnt_show(tmp_path):
+    class NoPopup(FakeClaudeTUI):
+        async def screen_text(self, agent):
+            buf, self.buf = self.buf, ""  # render without the /usage suggestion
+            try:
+                return await super().screen_text(agent)
+            finally:
+                self.buf = buf
+    tui = NoPopup()
+    cfg, sup, _ = make_sup(tmp_path, tui, ("claude-a",))
+    assert await sup.act.claude_usage("claude-a", "usage_check") is None
+    assert tui.buf == ""  # what it typed was taken back
+    [line] = [json.loads(ln) for ln in (cfg.state_dir / "audit.log").read_text().splitlines()
+              if "USAGE_READ_FAILED" in ln]
+    shot = line["detail"].split("(screen: ")[1].rstrip(")")
+    saved = Path(shot).read_text()
+    assert saved.startswith("the /usage suggestion did not show") and "auto mode on" in saved
+
+
+async def test_usage_reader_reads_a_screen_without_a_session_section(tmp_path):
+    """Claude 2.1.314 can open /usage on a cost summary with no "Current session" block (captured 2026-11-01)."""
+    screen = (Path(__file__).parent / "claude_usage_screen_no_session.txt").read_text()
+    tui = FakeClaudeTUI(screen=screen)
+    cfg, sup, _ = make_sup(tmp_path, tui, ("claude-a",))
+    windows = await sup.act.claude_usage("claude-a", "usage_check")
+    assert {k: v.left_pct for k, v in windows.items()} == {"week": 56, "fable": 71}
+    assert not tui.open
+
+
+async def test_claude_join_line_does_not_wait_for_the_session_window(tmp_path):
+    """Right after a restart (or with /usage opening on a cost summary) there's no 5-hour reading."""
+    cfg, sup, chan = make_sup(tmp_path, FakeTerminal(), ("claude-a",))
+    cfg.modes["usage_check"] = "live"
+    st = sup.agents["claude-a"]
+    st.usage.introduced = False
+    now = sup.now()
+    st.usage.windows.update(week=Window(25, now + 86400, now), fable=Window(12, now + 86400, now))
+    await sup.tick()
+    await asyncio.sleep(0.05)
+    assert any(t.startswith("claude-a usage: week 75% left") for t in chan.texts())

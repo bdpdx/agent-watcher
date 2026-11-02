@@ -14,7 +14,9 @@ import asyncio
 import datetime as dt
 import json
 import logging
+import os
 import re
+import shutil
 import subprocess
 import time
 from collections import deque
@@ -23,12 +25,12 @@ from enum import Enum
 from pathlib import Path
 from typing import Awaitable, Callable
 
-from .actuator import Actuator, Notifier, Terminal
+from .actuator import MODEL_MENU, Actuator, Notifier, Terminal
 from .assess import Assessor
 from .channel import Poster
 from .commands import HELP, Command, parse
 from .config import CHANNEL_SUFFIX, ModelRotation, WatcherConfig
-from .detect import codex_screen_capacity, codex_status_model, screen_lines
+from .detect import codex_screen_capacity, codex_status_model, composer_draft, screen_lines
 from .discovery import AgentRecord
 from .events import E, Event, Tier
 from .policy import Policy, Verdict
@@ -143,6 +145,26 @@ def _k(n: int | None) -> str:
     return f"{n / 1_000_000:.1f}M" if n >= 1_000_000 else f"{round(n / 1000)}k"
 
 
+async def quarantined_binary(command: str) -> str | None:
+    """The real path of `command` (e.g. "codex") when macOS has it quarantined, else None.
+
+    Homebrew quarantines each new cask version, and the first run then waits on a Gatekeeper dialog on the desktop:
+    an unattended relaunch would hang there.
+    """
+    found = shutil.which(command, path=os.pathsep.join([os.environ.get("PATH", ""), "/opt/homebrew/bin",
+                                                          "/usr/local/bin"]))
+    if not found:
+        return None
+    real = os.path.realpath(found)
+    try:
+        proc = await asyncio.create_subprocess_exec("/usr/bin/xattr", "-p", "com.apple.quarantine", real,
+                                                    stdout=asyncio.subprocess.DEVNULL,
+                                                    stderr=asyncio.subprocess.DEVNULL)
+        return real if await proc.wait() == 0 else None
+    except OSError:
+        return None
+
+
 def _hhmm(ts: float) -> str:
     return dt.datetime.fromtimestamp(ts).strftime("%H:%M") if ts else "?"
 
@@ -159,6 +181,7 @@ class Supervisor:
         self.now = now
         self.refresh: Callable[[], Awaitable[None]] | None = None  # discovery scan, run before typing a decision
         self.assessor = Assessor(cfg.assess)  # tests replace it
+        self.quarantined: Callable[[str], Awaitable[str | None]] = quarantined_binary  # tests replace it
         self.agents: dict[str, AgentState] = {}
         self.pending: dict[str, Pending] = {}
         self.seq = 0
@@ -574,7 +597,8 @@ class Supervisor:
     def _usage_expected(self, name: str) -> set[str]:
         if self.cfg.agents[name].kind == "codex":
             return {"weekly"}
-        return {"session", "week"} | ({"fable"} if self.cfg.mode("usage_check") == "live" else set())
+        # not "session": the 5-hour window is often missing (a new session; /usage can open without it)
+        return {"week"} | ({"fable"} if self.cfg.mode("usage_check") == "live" else set())
 
     def _on_usage(self, st: AgentState, windows: dict) -> None:
         for key, kind in update(st.usage, windows, self.cfg.usage_report_left_pct):
@@ -704,11 +728,15 @@ class Supervisor:
                 return
             if not await self.act.codex_switch_model(st.name, "capacity", rot, why=why) \
                     and self.cfg.mode("capacity") == "live":
-                self._post(st.project, f"{st.name}: couldn't switch models after \"{text}\"; nothing typed. "
-                                       "Owner notified.")
-                self._spawn(self.notifier.notify(f"agent-watcher: {st.name}", "Model switch failed; see audit.log"),
-                            "notify")
-                return
+                # the switch is optional; `continue` is what restarts the turn. Type it only into a clean prompt box
+                screen = await self.term.screen_text(st.name)
+                if composer_draft(screen, "codex") != "" or MODEL_MENU.search("\n".join(screen_lines(screen))):
+                    self._post(st.project, f"{st.name}: couldn't switch models after \"{text}\", and its prompt box "
+                                           "isn't clear; nothing typed. Owner notified.")
+                    self._spawn(self.notifier.notify(f"agent-watcher: {st.name}",
+                                                     "Model switch failed; see audit.log"), "notify")
+                    return
+                why += " (model switch failed; sending continue anyway)"
         await self.act.type(st.name, "capacity", T.CONTINUE, why=why)
 
     # ---- permissions -----------------------------------------------------------------------------
@@ -788,6 +816,9 @@ class Supervisor:
         no answer) leaves it to the owner, in the channel."""
         p = Pending(self._new_id(), st.name, st.project, kind, desc, "gm_own", owner_only=True, created=self.now(),
                     session=st.session_id)
+        for old in [q for q in self.pending.values() if q.rule == "gm_own" and q.agent == st.name
+                    and q.desc == desc and not q.resolved]:  # asked again: this request is the live one
+            await self._close_gm_request(old, f"superseded by {self._qualified(p.id)}, the same action asked again")
         reason = clean(ev.data.get("reason", ""), 300)
         mode = self.cfg.mode("gm_assess")
         text = await self._assess(p, self.cfg.agents[st.name], reviewer, reason)
@@ -813,6 +844,20 @@ class Supervisor:
         await self._post_pending(p, head)
         self._save_state()
         await self.notifier.notify(f"agent-watcher: {st.name}", f"GM needs your decision: {desc[:120]}")
+
+    async def _close_gm_request(self, p: Pending, why: str) -> None:
+        """Close one of the GM's own requests that is waiting on the owner. The GM didn't wait: by now it has gone on
+        (or will be blocked again if it still needs this), so a late approval would only type a stale grant."""
+        p.resolved = "closed"
+        self._save_state()
+        self.act.audit(p.agent, f"approvals_{p.kind}", self.cfg.mode(f"approvals_{p.kind}"), "CLOSED", p.desc, why)
+        await self.say(p.project, f"Closed: {why}. Nothing will be typed for this request.", p.thread_ts)
+
+    async def _expire_gm_requests(self) -> None:
+        limit = self.cfg.timing.gm_request_expiry_s
+        for p in [q for q in self.pending.values() if q.rule == "gm_own" and not q.resolved
+                  and self.now() - q.created >= limit]:
+            await self._close_gm_request(p, f"expired: no decision within {round(limit / 60)} min")
 
     async def _assess(self, p: Pending, a, reviewer: str, reason: str) -> str | None:
         """A one-line second opinion from a small model: advisory, except on the GM's own requests."""
@@ -1167,6 +1212,8 @@ class Supervisor:
             if moving:
                 await self.say(project, f"{agent} is moving here from {src} ({why}).")
             ok = await self._exit_and_launch(agent, "restart", project, recovery=False)
+            if ok is None:
+                return  # not relaunched; it said why
             done = f"{agent} {'moved to ' + project if moving else 'restarted'}." if ok else \
                 f"{agent} relaunched but hasn't joined {project} yet; owner notified."
             for p in dict.fromkeys([src, project]):
@@ -1174,10 +1221,18 @@ class Supervisor:
         finally:
             st.phase = Phase.WORKING
 
-    async def _exit_and_launch(self, agent: str, behavior: str, project: str, recovery: bool) -> bool:
+    async def _exit_and_launch(self, agent: str, behavior: str, project: str, recovery: bool) -> bool | None:
         """Quit (see Actuator.quit), pre-launch, relaunch with "join project <project>". Done when the new session
-        registers there."""
+        registers there. False: relaunched but not back yet; None: not relaunched (already reported)."""
         st, t, a = self.agents[agent], self.cfg.timing, self.cfg.agents[agent]
+        if (binary := await self.quarantined(a.kind)) is not None:  # before quitting: the running agent stays up
+            self.act.audit(agent, behavior, self.cfg.mode(behavior), "QUARANTINED", binary, "relaunch skipped")
+            await self.say(project, f"{agent}: not restarting. `{a.kind}` was updated and macOS still has it "
+                                    f"quarantined ({binary}), so a relaunch would wait on a desktop dialog asking to "
+                                    "allow it. Clear it (brew-maintenance does, after checking its signature) or run "
+                                    f"`{a.kind}` once by hand, then restart again.")
+            await self.notifier.notify(f"agent-watcher: {agent}", f"Restart skipped: {a.kind} is quarantined")
+            return None
         st.phase = Phase.EXITING
         self._retire_session(st, "it is being restarted")
         if st.retry_task:
@@ -1193,9 +1248,10 @@ class Supervisor:
             await self.say(project, f"{agent}: not restarting; couldn't quit it ({how}).")
             await self.notifier.notify(f"agent-watcher: {agent}", f"Restart stopped: couldn't quit ({how})")
             st.phase = Phase.WORKING
-            return False
+            return None
         if not await self._poll(agent_running, want=False, timeout=t.exit_timeout_s):
-            await self.act.interrupt(agent, behavior, why="agent did not exit")
+            shot = await self.act.save_screen(agent, "did not exit after the quit")
+            await self.act.interrupt(agent, behavior, why=f"agent did not exit (screen: {shot or 'not saved'})")
             if not await self._poll(agent_running, want=False, timeout=t.exit_timeout_s):
                 await self.notifier.notify(f"agent-watcher: {agent}", "Agent did not exit; restart stopped")
                 return False
@@ -1300,6 +1356,7 @@ class Supervisor:
     async def tick(self) -> None:
         """Once a minute: per-project schedules, GM changes, detached grace, the compaction cycle."""
         self._check_compaction_cycle()
+        await self._expire_gm_requests()
         self._save_state()  # with the latest usage readings
         for project in self.channel.projects():
             await self._check_gm_change(project)

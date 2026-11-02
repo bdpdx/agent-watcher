@@ -6,6 +6,7 @@ import pytest
 from agent_watcher.actuator import Actuator
 from agent_watcher.events import E, Event, Tier
 from agent_watcher.supervisor import Status, Supervisor
+from agent_watcher.supervisor import quarantined_binary as real_quarantined_binary
 from agent_watcher.templates import T, render
 
 from .conftest import P1, P2, FakeChannel, FakeNotifier, FakeTerminal, make_cfg, record
@@ -509,12 +510,57 @@ async def test_no_usage_line_while_a_restarted_agent_is_still_relaunching(world)
     assert not any(t.startswith("codex-a usage:") for t in w.chan.texts(P1))
 
 
+async def test_restart_is_skipped_while_the_binary_is_quarantined(world):
+    w = await world()
+    w.term.prompt_box = True
+    seen = []
+
+    async def quarantined(command):
+        seen.append(command)
+        return "/opt/homebrew/Caskroom/codex/9.9.9/bin/codex"
+    w.sup.quarantined = quarantined
+    await w.sup.handle(Event(E.IDLE, "codex-a", source="rollout"))
+    await w.sup.handle(msg("restart codex-a"))
+    await settle(30)
+    texts = w.chan.texts(P1)
+    assert seen == ["codex"] and w.term.sent.get("codex-a") is None  # never quit: it keeps running
+    assert any("not restarting" in t and "quarantined" in t for t in texts)
+    assert not any("hasn't joined" in t or "codex-a restarted." in t for t in texts)
+    assert w.notes.notes and audit(w.cfg)[-1]["action"] == "QUARANTINED"
+    assert w.sup.agents["codex-a"].phase.name == "WORKING"
+
+
+async def test_quarantined_binary_reads_the_real_flag(tmp_path, monkeypatch):
+    import os
+    import subprocess
+    exe = tmp_path / "bin" / "fakeagent"
+    exe.parent.mkdir()
+    exe.write_text("#!/bin/sh\n")
+    exe.chmod(0o755)
+    monkeypatch.setenv("PATH", str(exe.parent) + os.pathsep + os.environ["PATH"])
+    fn = real_quarantined_binary  # the autouse stub replaced the module attribute, not this import
+    assert await fn("fakeagent") is None
+    subprocess.run(["/usr/bin/xattr", "-w", "com.apple.quarantine", "0081;00000000;test;", str(exe)], check=True)
+    assert await fn("fakeagent") == os.path.realpath(exe)
+    assert await fn("no-such-command-here") is None
+
+
 async def test_restart_that_never_rejoins_is_reported(world):
     w = await world()
+    w.term.prompt_box = True  # it quits and relaunches, but its new session never joins
     await w.sup.handle(Event(E.IDLE, "codex-a", source="rollout"))
     await w.sup.handle(msg("restart codex-a"))
     await settle(60)
     assert any("hasn't joined" in t for t in w.chan.texts(P1))
+
+
+async def test_restart_that_cannot_quit_says_so_once(world):
+    w = await world()  # no prompt box on screen: /quit can't be typed
+    await w.sup.handle(Event(E.IDLE, "codex-a", source="rollout"))
+    await w.sup.handle(msg("restart codex-a"))
+    await settle(60)
+    texts = w.chan.texts(P1)
+    assert any("couldn't quit" in t for t in texts) and not any("hasn't joined" in t for t in texts)
 
 
 async def test_move_between_watched_projects(world):
@@ -1006,3 +1052,54 @@ async def test_a_restarted_watcher_posts_usage_from_saved_readings(world):
     assert any(t.startswith("codex-a usage: weekly 70% left") for t in texts)
     from agent_watcher.usage import update
     assert update(a2.usage, {"week": Window(81, now + 86400, now + 1)}, w2.cfg.usage_report_left_pct) == []
+
+
+async def test_gm_request_left_to_the_owner_expires(world):
+    w = await world()
+    w.cfg.modes["gm_assess"] = "live"
+    w.cfg.timing.gm_request_expiry_s = 1
+
+    async def unclear(**kw):
+        return "Unclear: can't tell."
+    w.sup.assessor = unclear
+    await w.sup.handle(blocked(w, "claude-a", "./sn reset dev12"))
+    await settle()
+    [p] = w.sup.pending.values()
+    await w.sup.tick()
+    assert not p.resolved  # not yet
+    await asyncio.sleep(1)
+    await w.sup.tick()
+    await settle()
+    assert p.resolved == "closed" and audit(w.cfg)[-1]["action"] == "CLOSED"
+    project, text, thread = w.chan.posts[-1]
+    assert thread == p.thread_ts and text.startswith("Closed: expired")
+    await w.sup.handle(msg("approve", tier=Tier.OWNER, sender="owner", thread_ts=p.thread_ts, is_bot=False))
+    await settle()
+    assert "Already closed" in w.chan.texts()[-1] and w.term.sent.get("claude-a") is None
+
+
+async def test_gm_request_asked_again_supersedes_the_old_one(world):
+    w = await world()
+    w.cfg.modes["gm_assess"] = "live"
+    answers = iter(["Unclear: can't tell.", "Looks project-related: its own dev instance."])
+
+    async def assess(**kw):
+        return next(answers)
+    w.sup.assessor = assess
+    await w.sup.handle(blocked(w, "claude-a", "./sn reset dev12"))
+    await settle()
+    [old] = w.sup.pending.values()
+    w.sup.agents["claude-a"].recent_blocks.clear()  # the same block again, later
+    await w.sup.handle(blocked(w, "claude-a", "./sn reset dev12"))
+    await settle()
+    assert old.resolved == "closed" and any("superseded by" in t for t in w.chan.texts())
+    assert any("Approved by the second opinion" in t for t in w.chan.texts())
+
+
+async def test_other_agents_requests_do_not_expire(world):
+    w = await world()
+    w.cfg.timing.gm_request_expiry_s = 0
+    await w.sup.handle(blocked(w, "codex-a", "./sn reset dev12"))
+    await settle()
+    await w.sup.tick()
+    assert not next(iter(w.sup.pending.values())).resolved

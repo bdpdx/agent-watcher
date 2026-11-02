@@ -1,0 +1,10 @@
+   Settings  Status   Config   Usage   Stats
+   Session
+   Total cost:            $1.00
+   Total duration (API):  1m 0s
+   Current week (all models)
+   ██████████████████████                             44% used
+   Resets Nov 5 at 7am (America/Los_Angeles)
+   Current week (Fable)
+   ██████████████▍                                    29% used
+   Resets Nov 5 at 7am (America/Los_Angeles)

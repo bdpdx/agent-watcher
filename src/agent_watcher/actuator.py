@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import json
 import logging
 import re
@@ -100,6 +101,9 @@ def make_notifier(command: list[str]) -> Notifier:
     return CommandNotifier(["notify-send", "--"] if shutil.which("notify-send") else [])
 
 
+MODEL_MENU = re.compile(r"Select Model and Effort|Select Reasoning Level")
+
+
 class Actuator:
     def __init__(self, cfg: WatcherConfig, terminal: Terminal, audit_path: Path, now=time.time):
         self.cfg = cfg
@@ -109,6 +113,22 @@ class Actuator:
         self.locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self.last_owner_key: dict[str, float] = {}
         audit_path.parent.mkdir(parents=True, exist_ok=True)
+
+    async def save_screen(self, agent: str, why: str) -> str:
+        """Keep the agent's screen when a keystroke step fails, so the cause can be seen later. The file's path, or ""
+        if the screen couldn't be read. The newest 200 are kept."""
+        try:
+            text = await self.term.screen_text(agent)
+            folder = self.audit_path.parent / "screens"
+            folder.mkdir(parents=True, exist_ok=True)
+            path = folder / f"{agent}-{dt.datetime.fromtimestamp(self.now()).strftime('%Y%m%d-%H%M%S')}.txt"
+            path.write_text(f"{why}\n\n" + "\n".join(screen_lines(text)) + "\n")
+            for old in sorted(folder.glob("*.txt"), key=lambda f: f.stat().st_mtime)[:-200]:
+                old.unlink(missing_ok=True)
+        except (OSError, RuntimeError) as e:
+            log.warning("%s: couldn't save the screen: %s", agent, e)
+            return ""
+        return str(path)
 
     def audit(self, agent: str, behavior: str, mode: Mode, action: str, detail: str, why: str = "") -> None:
         rec = {"ts": round(self.now(), 3), "agent": agent, "behavior": behavior, "mode": mode,
@@ -357,17 +377,20 @@ class Actuator:
         cmd = render(T.USAGE_SCREEN)
         await self.term.send_raw(agent, cmd)
         if await self._screen_shows(agent, r"^\s*❯\s*/usage\s{2,}\S") is None:
+            shot = await self.save_screen(agent, "the /usage suggestion did not show")
             await self.term.send_raw(agent, BACKSPACE * len(cmd))  # the prompt wasn't empty, or no popup
-            return False, "the /usage suggestion did not show", {}
+            return False, f"the /usage suggestion did not show (screen: {shot or 'not saved'})", {}
         await self.term.send_raw(agent, ENTER)
-        text = await self._screen_shows(agent, r"^\s*Current session\s*\n.*% used",
-                                         timeout=3 * self.cfg.timing.menu_timeout_s)  # the limits load
+        # the limits load; "Current session" isn't always there (the screen can open on a cost summary instead)
+        text = await self._screen_shows(agent, r"^\s*Current (?:session|week)\b.*\n.*% used",
+                                         timeout=3 * self.cfg.timing.menu_timeout_s)
         windows = parse_usage_screen(text) if text else {}
+        shot = "" if windows else await self.save_screen(agent, "no plan usage on the usage screen")
         if not await self._close_usage_screen(agent):
             log.warning("%s: the /usage screen did not close", agent)
             return False, "the usage screen did not close", windows
         if not windows:
-            return False, "no plan usage on the usage screen", {}
+            return False, f"no plan usage on the usage screen (screen: {shot or 'not saved'})", {}
         return True, ", ".join(f"{k} {w.left_pct}% left" for k, w in windows.items()), windows
 
     async def _close_usage_screen(self, agent: str) -> bool:
@@ -426,9 +449,14 @@ class Actuator:
 
     async def _model_menus(self, agent: str, rot: ModelRotation) -> tuple[bool, str]:
         async def back_out(times: int, why: str) -> tuple[bool, str]:
+            shot = await self.save_screen(agent, why)
+            why += f" (screen: {shot or 'not saved'})"
+            # Esc only while a menu shows: in Codex's prompt box a second Esc opens "edit previous message"
             for _ in range(times):
-                await self.term.send_raw(agent, ESC)
                 await asyncio.sleep(self.cfg.timing.menu_step_s)
+                if not MODEL_MENU.search("\n".join(screen_lines(await self.term.screen_text(agent)))):
+                    break
+                await self.term.send_raw(agent, ESC)
             return False, why
 
         session_effort = codex_status_effort(await self.term.screen_text(agent))
@@ -458,7 +486,8 @@ class Actuator:
         if not await self._select(agent, nxt):
             return await back_out(2, f"effort {nxt!r} not found in the effort menu")
         await self.term.send_raw(agent, rot.confirm_key)
-        if await self._screen_shows(agent, r"Select Reasoning Level", want=False) is None:
+        if await self._screen_shows(agent, r"Select Reasoning Level", want=False,
+                                    timeout=self.cfg.timing.menu_close_timeout_s) is None:
             return await back_out(2, "the effort menu did not close")
         return True, f"{rot.model}, effort {current or '?'} -> {nxt}"
 
