@@ -1,7 +1,7 @@
 # agent-watcher
 
-agent-watcher is a process helper for CLI coding agents (Claude Code and Codex) running in tmux panes or
-iTerm2 tabs. It learns what each agent is doing from its **hooks and session logs**, reports to one Slack channel
+agent-watcher is a process helper for CLI coding agents (Claude Code and Codex) running in tmux panes or, on
+macOS, iTerm2 tabs. It runs on macOS and Linux. It learns what each agent is doing from its **hooks and session logs**, reports to one Slack channel
 per project, `#<project>__agent-watcher`, and carries out decisions from that project's **GM** (and the owner) by
 typing a small fixed set of strings into the agents' terminals. It is not a project worker. No Slack text and no
 model output is ever typed into a terminal.
@@ -93,7 +93,10 @@ Thread replies count only under the watcher's own posts. Refused and owner-only 
 
 ## Setup
 
-1. **Install.** `python3.12 -m venv .venv && .venv/bin/pip install -e '.[dev]'`
+1. **Install.** `python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'` (Python 3.11 or later).
+   - **macOS:** agents can run in tmux or iTerm2.
+   - **Linux:** agents must run in tmux, which is the only terminal backend there. Debian and Ubuntu need
+     `sudo apt install tmux python3-venv`. Tested on Debian 12. Processes are read from `/proc`.
 2. **Configure.** Copy `watcher.toml.example` to `watcher.toml` and fill in the owner's Slack id and authorized
    humans. `agents.toml` (overrides) is optional.
 3. **Slack.** One Slack app per machine with Socket Mode on. Bot scopes: `channels:history`,
@@ -103,7 +106,7 @@ Thread replies count only under the watcher's own posts. Refused and owner-only 
    in the env file is never used. Don't run a slack-mcp-server listener on the same app. Each project's GM
    creates `#<project>__agent-watcher` and invites the watcher bot. Also subscribe to `member_left_channel`
    and `group_left` so the watcher notices when it's removed.
-4. **Terminal.** Run the daemon in its own tmux window or iTerm2 tab: `.venv/bin/agent-watcher run`.
+4. **Terminal.** Run the daemon in its own tmux window or (on macOS) iTerm2 tab: `.venv/bin/agent-watcher run`.
    - **tmux:** nothing to set up. The watcher reads panes with `capture-pane` and types through a paste buffer.
      It holds off while you're typing in an agent's pane (a client showing the pane reports new key activity)
      or scrolling it (copy mode), and never types into a pane in copy mode.
@@ -117,7 +120,10 @@ Thread replies count only under the watcher's own posts. Refused and owner-only 
    ```
    It exits 0 at once, prints nothing and decides nothing. Codex needs no hooks: its errors, denials,
    context size and compactions come from its rollout files.
-6. **Local control.** `agent-watcher status`, `restart <agent>|cohort:<project>`, `usage <agent>` (read `/usage` once idle), `pause [agent]`,
+6. **Notifications.** Owner notifications use macOS notifications, or `notify-send` on a Linux desktop
+   (`libnotify-bin`), and always go to `watcher.log`. On a machine with no desktop, set `[notify] command` in
+   `watcher.toml` or anything sent only there is seen only in the log.
+7. **Local control.** `agent-watcher status`, `restart <agent>|cohort:<project>`, `usage <agent>` (read `/usage` once idle), `pause [agent]`,
    `resume [agent]`. Each finds the daemon through `--config` (default `watcher.toml`): its `state_dir` holds the
    socket. `AGENT_WATCHER_SOCK` overrides it.
 
@@ -148,7 +154,7 @@ src/agent_watcher/
   tails.py       Codex rollouts (main + auto-review threads) and Claude transcripts
   terminals.py   routes each agent to its terminal backend
   tmux.py        tmux adapter (binding, screen, job name, typing, owner activity)
-  iterm.py       iTerm2 adapter (binding, screen, job name, keystroke monitor)
+  iterm.py       iTerm2 adapter, macOS only (binding, screen, job name, keystroke monitor)
 docs/GM.md       the GM's guide to the channel and commands
 ```
 

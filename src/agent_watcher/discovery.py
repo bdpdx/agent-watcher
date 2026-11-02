@@ -14,15 +14,16 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 import re
 import shlex
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
 from .detect import rollout_meta
-from .iterm import session_guid
 from .tmux import pane_ref
 
 Runner = Callable[[list[str]], str]
@@ -42,6 +43,51 @@ def run_cmd(cmd: list[str]) -> str:
         return subprocess.run(cmd, capture_output=True, text=True, timeout=10).stdout
     except (OSError, subprocess.SubprocessError):
         return ""
+
+
+def session_guid(iterm_session_id: str | None) -> str | None:
+    """$ITERM_SESSION_ID is "w0t0p0:<GUID>"; iTerm2's API calls the GUID the session_id."""
+    if not iterm_session_id:
+        return None
+    return iterm_session_id.split(":", 1)[-1] or None
+
+
+@dataclass
+class ProcInfo:
+    argv: list[str]
+    env: dict[str, str]
+    cwd: Path
+
+
+def linux_proc_info(pid: int, proc: Path = Path("/proc")) -> ProcInfo | None:
+    """A process's argv, environment and cwd from /proc; None if it's gone or belongs to another user."""
+    base = proc / str(pid)
+    try:
+        argv = [os.fsdecode(a) for a in (base / "cmdline").read_bytes().split(b"\0") if a]
+        pairs = (os.fsdecode(e).partition("=") for e in (base / "environ").read_bytes().split(b"\0"))
+        env = {k: v for k, _, v in pairs if k}
+        cwd = Path(os.readlink(base / "cwd"))
+    except OSError:
+        return None
+    return ProcInfo(argv, env, cwd) if argv else None
+
+
+def mac_proc_info(pid: int, run: Runner) -> ProcInfo | None:
+    """The same from `ps` and `lsof`: macOS has no /proc."""
+    args = run(["ps", "-ww", "-p", str(pid), "-o", "command="]).rstrip("\n")
+    full = run(["ps", "-wwE", "-p", str(pid), "-o", "command="]).rstrip("\n")
+    if not args or not full:
+        return None
+    env = dict(_ENV.findall(full[len(args):] if full.startswith(args) else full))
+    cwd_out = run(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"])
+    cwd = next((Path(ln[1:]) for ln in cwd_out.splitlines() if ln.startswith("n")), None)
+    if cwd is None:
+        return None
+    try:
+        argv = shlex.split(args)
+    except ValueError:
+        argv = args.split()
+    return ProcInfo(argv, env, cwd)
 
 
 def transcript_dir(home: Path, cwd: Path) -> Path:
@@ -92,8 +138,9 @@ class AgentRecord:
 
 
 class Discovery:
-    def __init__(self, run: Runner = run_cmd, now: Callable[[], float] | None = None):
+    def __init__(self, run: Runner = run_cmd, now: Callable[[], float] | None = None, platform: str = sys.platform):
         self.run = run
+        self.platform = platform
         self.now = now or (lambda: dt.datetime.now().timestamp())
         self.hook_sessions: dict[Path, str] = {}  # Claude home -> session id from its latest hook
         self._rollout_meta: dict[Path, dict] = {}
@@ -107,26 +154,19 @@ class Discovery:
         tty = self.run(["ps", "-p", str(pid), "-o", "tty="]).strip()
         if not tty or tty.startswith("?"):
             return None  # no terminal: a daemon (Codex app-server, `claude daemon`), not an agent session
-        args = self.run(["ps", "-ww", "-p", str(pid), "-o", "command="]).rstrip("\n")
-        full = self.run(["ps", "-wwE", "-p", str(pid), "-o", "command="]).rstrip("\n")
-        if not args or not full:
+        info = linux_proc_info(pid) if self.platform == "linux" else mac_proc_info(pid, self.run)
+        if info is None:
             return None
-        env = dict(_ENV.findall(full[len(args):] if full.startswith(args) else full))
+        env = info.env
         # tmux first: a tmux server started from iTerm2 hands that tab's ITERM_SESSION_ID to every pane.
-        pane, guid = pane_ref(env.get("TMUX"), env.get("TMUX_PANE")), session_guid(env.get("ITERM_SESSION_ID"))
+        # iTerm2 runs only on macOS; anywhere else the variable came along over ssh and there's no tab to drive.
+        pane = pane_ref(env.get("TMUX"), env.get("TMUX_PANE"))
+        guid = session_guid(env.get("ITERM_SESSION_ID")) if self.platform == "darwin" else None
         term_id = f"tmux:{pane}" if pane else f"iterm:{guid}" if guid else None
         if not term_id:
             return None  # not in a tmux pane or an iTerm2 tab (e.g. the Codex app-server)
         home = Path(env.get(HOME_VARS[kind]) or DEFAULT_HOMES[kind]).expanduser()
-        cwd_out = self.run(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"])
-        cwd = next((Path(ln[1:]) for ln in cwd_out.splitlines() if ln.startswith("n")), None)
-        if cwd is None:
-            return None
-        try:
-            argv = shlex.split(args)
-        except ValueError:
-            argv = args.split()
-        return AgentRecord(kind, home, pid, term_id, cwd, argv)
+        return AgentRecord(kind, home, pid, term_id, info.cwd, info.argv)
 
     # ---- sessions -----------------------------------------------------------------------------
 

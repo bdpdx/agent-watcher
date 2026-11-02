@@ -18,13 +18,6 @@ log = logging.getLogger(__name__)
 TAG = "user.agentWatcherAgent"
 
 
-def session_guid(iterm_session_id: str | None) -> str | None:
-    """$ITERM_SESSION_ID is "w0t0p0:<GUID>"; the API's session_id is the GUID."""
-    if not iterm_session_id:
-        return None
-    return iterm_session_id.split(":", 1)[-1] or None
-
-
 class ITermTerminal:
     def __init__(self, cfg: WatcherConfig, emit: Callable[[Event], Awaitable[None]],
                  on_change: Callable[[], None] = lambda: None):

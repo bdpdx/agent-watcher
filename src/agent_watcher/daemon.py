@@ -1,4 +1,4 @@
-"""The daemon: wires discovery, hooks, session logs, the channels and the terminals (iTerm2, tmux) to the supervisor."""
+"""The daemon: wires discovery, hooks, session logs, the channels and the terminals (tmux, iTerm2) to the supervisor."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import os
 import signal
 from pathlib import Path
 
-from .actuator import Actuator, MacNotifier
+from .actuator import Actuator, make_notifier
 from .channel import SlackChannel, slack_tokens
 from .config import CHANNEL_SUFFIX, WatcherConfig
 from .detect import codex_screen_capacity, from_hook
@@ -71,7 +71,7 @@ class Daemon:
         else:
             log.warning("no Slack bot/app tokens (env %s/%s or [slack] env_file); no projects can be served",
                         cfg.slack_bot_token_env, cfg.slack_app_token_env)
-        self.sup = Supervisor(cfg, self.term, self.actuator, channel, MacNotifier())
+        self.sup = Supervisor(cfg, self.term, self.actuator, channel, make_notifier(cfg.notify_command))
         self.sup.refresh = self._discover_once
         self.transcripts = ClaudeTranscriptTailer(cfg, self.emit)
         self.rollouts: dict[str, asyncio.Task] = {}  # agent -> its Codex rollout tailer

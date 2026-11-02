@@ -63,7 +63,7 @@ def test_discovery_prefers_tmux_over_inherited_iterm(tmp_path):
                   "env": {"ITERM_SESSION_ID": "w0t0p0:GUID-A", "TMUX": f"{SOCK},18682,0", "TMUX_PANE": "%7"}},
              11: {"name": "codex", "args": "codex", "cwd": tmp_path,
                   "env": {"CODEX_HOME": str(tmp_path / ".codex"), "TERM": "screen"}}}  # GNU screen: not driven
-    recs = Discovery(runner(procs)).scan()
+    recs = Discovery(runner(procs), platform="darwin").scan()
     assert [r.term_id for r in recs] == [f"tmux:%7:{SOCK}"]
 
 

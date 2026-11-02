@@ -20,14 +20,20 @@ BEHAVIORS = ("channel", "capacity", "approvals_block", "approvals_dialog", "rest
 
 # Searches and reads that are never project work. Matched against the command and action summary.
 DEFAULT_REFUSE = [
-    r"(^|[\s;&|(])(find|fd|du|tree)\s+(\S+\s+)*?(/|~|\$HOME|/Users|/System|/Library|/Volumes|/private|/opt|/usr)/?(\s|$)",
-    r"(^|[\s;&|(])(grep|rg|ag)\s+(-\S+\s+)*\S+\s+(/|~|\$HOME|/Users)/?(\s|$)",
-    r"(^|[\s;&|(])(mdfind|locate)\s",
-    r"(~|\$HOME|/Users/[^/\s]+)/\.(ssh|aws|gnupg|kube|docker/config\.json|netrc)",
+    r"(^|[\s;&|(])(find|fd|du|tree)\s+(\S+\s+)*?(/|~|\$HOME|/Users|/System|/Library|/Volumes|/private|/opt|/usr"
+    r"|/home|/root|/mnt|/media|/srv|/var|/etc)/?(\s|$)",
+    r"(^|[\s;&|(])(grep|rg|ag)\s+(-\S+\s+)*\S+\s+(/|~|\$HOME|/Users|/home|/root|/etc)/?(\s|$)",
+    r"(^|[\s;&|(])(mdfind|locate|plocate|mlocate)\s",
+    r"(~|\$HOME|/Users/[^/\s]+|/home/[^/\s]+|/root)/\.(ssh|aws|gnupg|kube|docker/config\.json|netrc)",
     r"Library/(Keychains|Application Support/(Google/Chrome|Firefox|Microsoft Edge|BraveSoftware))",
+    r"\.config/(google-chrome|chromium|BraveSoftware|microsoft-edge)\b|\.mozilla/|\.local/share/keyrings\b",
     r"(^|[\s;&|(])security\s+(find-(generic|internet)-password|dump-keychain)",
-    r"(^|[\s;&|(])sudo\s",
+    r"(^|[\s;&|(])secret-tool\s+(lookup|search)\b",
+    r"/etc/(shadow|gshadow|sudoers)\b|/proc/(\d+|self)/environ\b",
+    r"(^|[\s;&|(])(sudo|doas|pkexec)\s",
     r"/Users/(?!{home_user}\b)[^/\s]+/",  # another user's home directory
+    r"(?<![^\s'\"=:(])/home/(?!{home_user}/)[^/\s]+/",
+    r"(?<![^\s'\"=:(])/(?!{home_user}/)root/",  # root's home, unless the watcher runs as root
 ]
 
 
@@ -129,6 +135,7 @@ class WatcherConfig:
     usage_intro_wait_s: float = 15 * 60  # post the join line with what's known after this long
     gm_usage_delay_s: float = 60  # when the GM joins, wait this long for readings, then post every agent's usage
     assess: "AssessConfig" = field(default_factory=lambda: AssessConfig())  # [assess]: second opinion on requests
+    notify_command: list[str] = field(default_factory=list)  # [notify] command: argv for owner notifications
     start_script: str | None = None  # [launch] start_script, e.g. "~/.bin/start-{agent}": relaunch through it
 
     def start_script_for(self, name: str) -> Path | None:
@@ -214,6 +221,10 @@ def load(watcher_path: Path, agents_path: Path | None = None) -> WatcherConfig:
     if bad := [k for k in local_kinds if k not in DEFAULT_KEYS]:
         raise ValueError(f"[local] manage: unknown agent kinds {bad}")
 
+    notify_command = raw.get("notify", {}).get("command", [])
+    if not isinstance(notify_command, list) or not all(isinstance(a, str) for a in notify_command):
+        raise ValueError("[notify] command must be a list of strings")
+
     def rotation(section: str, need_efforts: bool) -> ModelRotation | None:
         rot = raw.get(section)
         if not rot or not rot.get("model"):
@@ -244,6 +255,7 @@ def load(watcher_path: Path, agents_path: Path | None = None) -> WatcherConfig:
         local_kinds=local_kinds,
         codex_rotation=rotation("codex_capacity", need_efforts=True),
         codex_cyber=rotation("codex_cyber", need_efforts=False),
+        notify_command=notify_command,
         start_script=raw.get("launch", {}).get("start_script") or None,
         assess=AssessConfig(**{k: v for k, v in raw.get("assess", {}).items()
                                if k in ("model", "claude", "config_dir", "timeout_s")}),

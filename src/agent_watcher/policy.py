@@ -69,7 +69,8 @@ _WRITES_ALL = {"rm", "rmdir", "mkdir", "touch", "chmod", "chown", "tee", "trunca
 _WRITES_LAST = {"cp", "mv", "ln", "install", "rsync"}
 _REDIRECT = re.compile(r"^\d?(>>?)(.*)$")
 # Temporary and scratch locations any agent may write to.
-_TEMP_ROOTS = [Path("/tmp"), Path("/private/tmp"), Path("/var/folders"), Path("/private/var/folders"), Path("/dev")]
+_TEMP_ROOTS = [Path("/tmp"), Path("/private/tmp"), Path("/var/folders"), Path("/private/var/folders"), Path("/dev"),
+               Path("/var/tmp")]
 
 
 def write_targets(script: str, cwd: Path) -> list[Path]:

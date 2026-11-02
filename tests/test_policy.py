@@ -59,6 +59,21 @@ def test_refuse_patterns(cfg):
         assert ev(cfg, "claude-a", cmd).verdict is Verdict.REFUSE, cmd
 
 
+def test_refuse_patterns_linux(cfg):
+    for cmd in ("find /home -name id_rsa", "find /root -name x", "grep -r token /home", "grep -r pass /etc",
+                "plocate id_rsa", "cat /home/alex/.ssh/id_ed25519", "cat /root/.aws/credentials",
+                "ls /home/dana/Documents/", "cat /root/notes", "cat ~/.config/google-chrome/Default/Cookies",
+                "ls ~/.mozilla/firefox/", "cat ~/.local/share/keyrings/login.keyring",
+                "secret-tool lookup service github", "cat /etc/shadow", "cat /proc/1234/environ",
+                "doas rm /tmp/x", "pkexec true"):
+        assert ev(cfg, "claude-a", cmd).verdict is Verdict.REFUSE, cmd
+
+
+def test_linux_paths_that_are_not_other_users_homes(cfg):
+    for cmd in ("ls /home/alex/code/", "cat build/root/config", "ls src/home/dana/", "cat /proc/cpuinfo"):
+        assert ev(cfg, "claude-a", cmd).verdict is not Verdict.REFUSE, cmd
+
+
 def test_owner_only(cfg):
     assert ev(cfg, "claude-a", "npm run reset-prod").verdict is Verdict.OWNER
 
@@ -75,16 +90,18 @@ def test_rate_cap_sends_auto_approvals_to_gm(cfg):
 def test_writes_outside_the_projects_folders_are_refused(cfg):
     a = cfg.agents["codex-a"]
     for cmd in ("echo x > ~/.zshrc", "cp build/app /usr/local/bin/app", "mkdir -p /opt/thing && touch /opt/thing/x",
-                "sed -i '' s/a/b/ /etc/hosts", "printf hi | tee ~/Library/LaunchAgents/x.plist"):
+                "sed -i '' s/a/b/ /etc/hosts", "printf hi | tee ~/Library/LaunchAgents/x.plist",
+                "sed -i s/a/b/ /etc/hosts", "printf hi | tee ~/.config/systemd/user/x.service"):
         r = ev(cfg, "codex-a", cmd)
         assert r.verdict is Verdict.REFUSE and "outside the project's folders" in r.rule, cmd
-    r = Policy(cfg).evaluate(a, "Write", {"file_path": "/Users/someone-else/notes.md"}, str(a.clone))
-    assert r.verdict is Verdict.REFUSE
+    for path in ("/Users/someone-else/notes.md", "/home/someone-else/notes.md"):
+        assert Policy(cfg).evaluate(a, "Write", {"file_path": path}, str(a.clone)).verdict is Verdict.REFUSE
 
 
 def test_writes_inside_the_project_temp_or_own_home_are_not_refused(cfg):
     a = cfg.agents["codex-a"]
     for cmd in ("echo x > out.log 2>&1", f"cp a.txt {a.clone}/b.txt", "mkdir -p /tmp/run && rm -rf /tmp/run",
+                "touch /var/tmp/x", "sed -i s/a/b/ out.log",
                 f"touch {cfg.project_state_dir}/note", f"echo hi > {a.config_dir}/memory.md", "cmd >/dev/null 2>&1",
                 'cp x "$SP/out"'):
         assert ev(cfg, "codex-a", cmd).verdict is not Verdict.REFUSE, cmd

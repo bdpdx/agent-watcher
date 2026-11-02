@@ -1,7 +1,12 @@
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
-from agent_watcher.discovery import Discovery, transcript_dir
+import pytest
+
+from agent_watcher.discovery import Discovery, linux_proc_info, transcript_dir
 
 HOME = str(Path.home())
 
@@ -38,11 +43,12 @@ def test_claude_default_home_session_and_registration(tmp_path, monkeypatch):
     tdir.mkdir(parents=True)
     (tdir / "old.jsonl").write_text("{}\n")
     (tdir / "9c54.jsonl").write_text("{}\n")
+    os.utime(tdir / "old.jsonl", (1, 1))
     write_state(home, [{"project": "p1", "agent": "claude-a", "session_id": "9c54"},
                        {"project": "p0", "agent": "claude-a", "session_id": "old-session"}])
     procs = {10: {"name": "claude", "args": "claude", "cwd": cwd,
                   "env": {"ITERM_SESSION_ID": "w0t0p0:GUID-A", "TERM": "xterm"}}}
-    recs = Discovery(runner(procs)).scan()
+    recs = Discovery(runner(procs), platform="darwin").scan()
     assert len(recs) == 1
     r = recs[0]
     assert r.home == home and r.term_id == "iterm:GUID-A" and r.cwd == cwd
@@ -56,7 +62,7 @@ def test_hook_session_wins_over_newest_transcript(tmp_path):
     procs = {10: {"name": "claude", "args": "claude", "cwd": cwd,
                   "env": {"CLAUDE_CONFIG_DIR": str(home), "ITERM_SESSION_ID": "w0t1p0:G"}}}
     write_state(home, [{"project": "p1", "agent": "claude-g", "session_id": "from-hook"}])
-    d = Discovery(runner(procs))
+    d = Discovery(runner(procs), platform="darwin")
     d.hook_sessions[home] = "from-hook"
     assert d.scan()[0].regs[0].agent == "claude-g"
 
@@ -80,7 +86,7 @@ def test_codex_session_from_main_rollout_and_launch(tmp_path):
              "env": {"CODEX_HOME": str(home), "ITERM_SESSION_ID": "w1t0p0:G2"}},
         22: {"name": "codex", "args": "codex app-server", "cwd": "/", "env": {"CODEX_HOME": str(home)}},
     }
-    recs = Discovery(runner(procs)).scan()
+    recs = Discovery(runner(procs), platform="darwin").scan()
     assert len(recs) == 1 and recs[0].session_id == "T-MAIN" and recs[0].regs[0].agent == "codex-a1"
     launch = recs[0].launch_command()
     assert f"CODEX_HOME={home}" in launch and "--remote unix:// -C" in launch and "resume" not in launch
@@ -118,8 +124,60 @@ def test_unregistered_session_has_no_regs(tmp_path):
     home = tmp_path / ".codex-x"
     procs = {30: {"name": "codex", "args": "codex", "cwd": tmp_path,
                   "env": {"CODEX_HOME": str(home), "ITERM_SESSION_ID": "w0t3p0:G3"}}}
-    recs = Discovery(runner(procs)).scan()
+    recs = Discovery(runner(procs), platform="darwin").scan()
     assert recs[0].regs == [] and recs[0].session_id is None
+
+
+def fake_proc(root: Path, pid: int, argv: list[str], env: dict[str, str], cwd: Path) -> None:
+    d = root / str(pid)
+    d.mkdir(parents=True)
+    (d / "cmdline").write_bytes(b"\0".join(a.encode() for a in argv) + b"\0")
+    (d / "environ").write_bytes(b"\0".join(f"{k}={v}".encode() for k, v in env.items()) + b"\0")
+    (d / "cwd").symlink_to(cwd)
+
+
+def test_linux_proc_info_keeps_spaces_in_arguments_and_values(tmp_path):
+    cwd = tmp_path / "my clone"
+    cwd.mkdir()
+    fake_proc(tmp_path / "proc", 7, ["codex", "-C", "/a b"], {"CODEX_HOME": "/h o m e", "X": "a=b"}, cwd)
+    info = linux_proc_info(7, tmp_path / "proc")
+    assert info.argv == ["codex", "-C", "/a b"] and info.cwd == cwd
+    assert info.env == {"CODEX_HOME": "/h o m e", "X": "a=b"}
+
+
+def test_linux_proc_info_of_a_process_that_is_gone(tmp_path):
+    assert linux_proc_info(7, tmp_path) is None
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="reads the real /proc")
+def test_linux_proc_info_of_a_real_process(tmp_path):
+    env = {"TMUX": "/tmp/sock,1,0", "TMUX_PANE": "%9"}
+    p = subprocess.Popen(["sleep", "30"], env=env, cwd=tmp_path)
+    try:
+        info = linux_proc_info(p.pid)
+    finally:
+        p.kill()
+        p.wait()
+    assert info.argv == ["sleep", "30"] and info.env["TMUX_PANE"] == "%9" and info.cwd == tmp_path.resolve()
+
+
+def linux_discovery(monkeypatch, tmp_path, env):
+    """A Linux scan of one `claude` process with a fake ps and pgrep."""
+    monkeypatch.setattr("agent_watcher.discovery.linux_proc_info",
+                        lambda pid: linux_proc_info(pid, tmp_path / "proc"))
+    fake_proc(tmp_path / "proc", 10, ["claude"], env, tmp_path)
+    return Discovery(lambda cmd: {"pgrep": "10\n" if cmd[-1] == "claude" else "", "ps": "pts/1\n"}[cmd[0]],
+                     platform="linux")
+
+
+def test_linux_scan_binds_a_tmux_agent_with_no_lsof(tmp_path, monkeypatch):
+    recs = linux_discovery(monkeypatch, tmp_path, {"TMUX": "/tmp/s,1,0", "TMUX_PANE": "%4"}).scan()
+    assert [(r.term_id, r.cwd) for r in recs] == [("tmux:%4:/tmp/s", tmp_path)]
+
+
+def test_linux_ignores_iterm_session_outside_tmux(tmp_path, monkeypatch):
+    """ITERM_SESSION_ID can arrive over ssh; there is no iTerm2 on this machine to drive."""
+    assert linux_discovery(monkeypatch, tmp_path, {"ITERM_SESSION_ID": "w0t0p0:G"}).scan() == []
 
 
 def test_start_script_is_used_to_relaunch_when_present(tmp_path):

@@ -6,6 +6,8 @@ import asyncio
 import json
 import logging
 import re
+import shutil
+import sys
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -60,6 +62,42 @@ class MacNotifier:
             "osascript", "-e", f'display notification "{q(message)}" with title "{q(title)}"',
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
         await proc.wait()
+
+
+class CommandNotifier:
+    """Logs each notification and, with an argv, runs it with the title and message as its last two arguments.
+    No shell: the message can quote an agent's output."""
+
+    def __init__(self, argv: list[str], timeout_s: float = 10):
+        self.argv = argv
+        self.timeout_s = timeout_s
+
+    async def notify(self, title: str, message: str) -> None:
+        log.warning("notify: %s: %s", title, message)
+        if not self.argv:
+            return
+        try:
+            proc = await asyncio.create_subprocess_exec(*self.argv, title, message[:200],
+                                                        stdout=asyncio.subprocess.DEVNULL,
+                                                        stderr=asyncio.subprocess.DEVNULL)
+        except OSError as e:
+            log.warning("notify command %s failed: %s", self.argv[0], e)
+            return
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=self.timeout_s)
+        except TimeoutError:
+            proc.kill()
+            await proc.wait()
+            log.warning("notify command %s timed out", self.argv[0])
+
+
+def make_notifier(command: list[str]) -> Notifier:
+    """[notify] command if set, else this desktop's notifications; with no desktop tool, watcher.log only."""
+    if command:
+        return CommandNotifier(command)
+    if sys.platform == "darwin":
+        return MacNotifier()
+    return CommandNotifier(["notify-send", "--"] if shutil.which("notify-send") else [])
 
 
 class Actuator:

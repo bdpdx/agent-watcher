@@ -1,13 +1,16 @@
-"""Routes each agent to the terminal it runs in: an iTerm2 tab or a tmux pane."""
+"""Routes each agent to the terminal it runs in: a tmux pane or, on macOS, an iTerm2 tab."""
 
 from __future__ import annotations
 
-from typing import Awaitable, Callable
+import sys
+from typing import TYPE_CHECKING, Awaitable, Callable
 
 from .config import WatcherConfig
 from .events import Event
-from .iterm import ITermTerminal
 from .tmux import TmuxTerminal
+
+if TYPE_CHECKING:
+    from .iterm import ITermTerminal
 
 
 class Terminals:
@@ -16,7 +19,10 @@ class Terminals:
 
     def __init__(self, cfg: WatcherConfig, emit: Callable[[Event], Awaitable[None]],
                  on_change: Callable[[], None] = lambda: None):
-        self.iterm = ITermTerminal(cfg, emit, on_change)
+        self.iterm: ITermTerminal | None = None
+        if sys.platform == "darwin":  # the iterm2 package is only installed there
+            from .iterm import ITermTerminal
+            self.iterm = ITermTerminal(cfg, emit, on_change)
         self.tmux = TmuxTerminal(cfg, emit, on_change)
         self._backend: dict[str, ITermTerminal | TmuxTerminal] = {}  # agent -> the backend it's bound through
 
@@ -56,4 +62,5 @@ class Terminals:
 
     async def start(self) -> None:
         await self.tmux.start()
-        await self.iterm.start()
+        if self.iterm:
+            await self.iterm.start()

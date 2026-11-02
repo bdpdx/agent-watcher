@@ -63,6 +63,13 @@ model = "claude-haiku-5-5"
 # claude = "claude"            # the CLI
 # config_dir = "~/.claude"     # whose login to use; default: the CLI's default (~/.claude)
 
+# Owner notifications that may have no Slack post to go with them: a local agent's news, a restart that stopped.
+# By default: macOS notifications, or notify-send on a Linux desktop; both also go to watcher.log. A machine with no
+# desktop gets only the log, so set a command there: it runs (no shell) with the title and message as its last two
+# arguments.
+[notify]
+# command = ["/home/me/.bin/notify-owner"]
+
 [launch]
 # start_script = "~/.bin/start-{agent}"
 
@@ -70,7 +77,7 @@ model = "claude-haiku-5-5"
 capacity_first_delay_s = 30   # doubles on each consecutive retry
 capacity_max_tries = 5
 claude_limit_grace_s = 300     # after a plan limit resets, Claude continues by itself; else `continue` then
-gm_answer_timeout_s = 900       # then the owner gets a macOS notification
+gm_answer_timeout_s = 900       # then the owner gets a notification
 cohort_restart_scheduled = false  # true: the watcher hosting the GM asks it for a cohort restart on this schedule
 cohort_restart_every_h = 12     # the schedule; also the period of the compaction counts
 cohort_restart_anchor = "06:00"
