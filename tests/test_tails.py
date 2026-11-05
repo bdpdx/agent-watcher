@@ -158,3 +158,25 @@ async def test_claude_transcript_tailer(cfg, tmp_path):
            {"type": "assistant", "message": {"usage": {"input_tokens": 5, "cache_read_input_tokens": 30000}}})
     await t.scan_once()
     assert got[-2].data["count"] == 2 and got[-1].kind is E.CONTEXT and got[-1].data["tokens"] == 30005
+
+
+async def test_tailer_follows_a_session_started_days_ago(cfg):
+    # codex-r, 2026-11-05: its session began on 11/02, so its rollout sits in that day's folder
+    agent = cfg.agents["codex-a"]
+    day = dt.date.today() - dt.timedelta(days=5)
+    d = agent.config_dir / "sessions" / f"{day.year:04d}" / f"{day.month:02d}" / f"{day.day:02d}"
+    d.mkdir(parents=True)
+    main = d / "rollout-old-main.jsonl"
+    _write(main, {"type": "session_meta", "payload": {"id": "M1", "thread_source": "user", "cwd": str(agent.clone)}})
+    got = []
+
+    async def emit(ev):
+        got.append(ev)
+
+    t = RolloutTailer(agent, emit)
+    await t.scan_once()
+    _write(main, {"type": "event_msg", "payload": {"type": "task_complete", "error": {
+        "message": "Selected model is at capacity. Please try a different model.",
+        "codex_error_info": "server_overloaded"}}})
+    await t.scan_once()
+    assert [e.kind for e in got if not e.data.get("baseline")] == [E.CAPACITY]

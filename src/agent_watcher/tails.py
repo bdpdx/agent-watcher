@@ -24,6 +24,7 @@ from typing import Any, Awaitable, Callable
 from .config import AgentConfig, WatcherConfig
 from .detect import (GuardianReview, claude_compaction, claude_context_tokens, codex_compaction, codex_context,
                      from_codex_main_line, iso_ts, rollout_meta)
+from .discovery import rollout_files
 from .events import E, Event
 from .usage import codex_rate_limits
 
@@ -126,11 +127,6 @@ class RolloutTailer:
         self._first_scan = True
         self._preexisting: set[Path] = set()  # files there at the first scan: what they hold already happened
 
-    def _day_dirs(self) -> list[Path]:
-        today = dt.date.today()
-        days = [today - dt.timedelta(days=1), today, today + dt.timedelta(days=1)]  # rollouts are UTC-dated
-        return [self.root / f"{d.year:04d}" / f"{d.month:02d}" / f"{d.day:02d}" for d in days]
-
     async def _track(self, path: Path) -> _Tail | None:
         try:
             with path.open() as f:
@@ -175,10 +171,8 @@ class RolloutTailer:
             return True
 
     async def scan_once(self) -> None:
-        candidates: list[Path] = []
-        for d in self._day_dirs():
-            if d.is_dir():
-                candidates.extend(sorted(d.glob("rollout-*.jsonl"), key=lambda p: p.stat().st_mtime))
+        # New rollouts appear in the folders around today; the first scan also finds sessions started days ago
+        candidates = rollout_files(self.root, (-1, 0, 1), every_day=self._first_scan)
         if self._first_scan:
             self._preexisting = set(candidates)
         for path in candidates:

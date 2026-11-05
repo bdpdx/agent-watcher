@@ -120,6 +120,26 @@ def test_codex_ignores_earlier_sessions_still_written_after_the_registered_one(t
     assert d.codex_session(home, cwd) == "T-RESTART"
 
 
+def test_codex_session_started_days_ago_is_still_found(tmp_path):
+    # codex-r, 2026-11-05: its session began on 11/02, and at midnight that folder left the days searched
+    import datetime as dt
+    import os
+    home = tmp_path / ".codex-r"
+    cwd = tmp_path / "r"
+    day = dt.date.today() - dt.timedelta(days=3)
+    old = home / "sessions" / f"{day.year:04d}" / f"{day.month:02d}" / f"{day.day:02d}"
+    old.mkdir(parents=True)
+    f = old / "rollout-long.jsonl"
+    f.write_text(json.dumps({"type": "session_meta", "payload": {
+        "id": "T-LONG", "thread_source": "user", "cwd": str(cwd), "timestamp": "2026-11-02T21:35:21Z"}}) + "\n")
+    d = Discovery(lambda cmd: "")
+    assert d.codex_session(home, cwd) == "T-LONG"  # the first look searches every day folder
+    assert d.codex_session(home, cwd) == "T-LONG"  # later looks remember it
+    stale = dt.datetime.now().timestamp() - 4 * 86400
+    os.utime(f, (stale, stale))
+    assert d.codex_session(home, cwd) is None  # no longer written: an old session, not this one
+
+
 def test_unregistered_session_has_no_regs(tmp_path):
     home = tmp_path / ".codex-x"
     procs = {30: {"name": "codex", "args": "codex", "cwd": tmp_path,

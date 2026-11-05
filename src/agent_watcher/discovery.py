@@ -90,6 +90,39 @@ def mac_proc_info(pid: int, run: Runner) -> ProcInfo | None:
     return ProcInfo(argv, env, cwd)
 
 
+# Codex files a rollout under the local date its session started, and a session can run for days. Files in the day
+# folders around today are always candidates; an older folder's file counts while it is still being written.
+ROLLOUT_ACTIVE_S = 3 * 86400
+
+
+def day_dirs(root: Path, deltas: tuple[int, ...] = (-2, -1, 0, 1)) -> list[Path]:
+    today = dt.date.today()
+    days = [today + dt.timedelta(days=n) for n in deltas]
+    return [root / f"{d.year:04d}" / f"{d.month:02d}" / f"{d.day:02d}" for d in days]
+
+
+def rollout_files(root: Path, deltas: tuple[int, ...] = (-2, -1, 0, 1), every_day: bool = False,
+                  known: set[Path] | None = None) -> list[Path]:
+    """Rollouts under a Codex sessions root, oldest written first: those in the day folders around today, plus
+    any in an older folder (every one of them when `every_day`, else those in `known`) written in the last
+    ROLLOUT_ACTIVE_S."""
+    recent: set[Path] = set()
+    for d in day_dirs(root, deltas):
+        if d.is_dir():
+            recent.update(d.glob("rollout-*.jsonl"))
+    older = set(root.glob("*/*/*/rollout-*.jsonl")) if every_day and root.is_dir() else set(known or ())
+    since = dt.datetime.now().timestamp() - ROLLOUT_ACTIVE_S
+    out: list[tuple[float, Path]] = []
+    for p in recent | older:
+        try:
+            mtime = p.stat().st_mtime
+        except OSError:
+            continue
+        if p in recent or mtime >= since:
+            out.append((mtime, p))
+    return [p for _, p in sorted(out)]
+
+
 def transcript_dir(home: Path, cwd: Path) -> Path:
     return home / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(cwd))
 
@@ -144,6 +177,7 @@ class Discovery:
         self.now = now or (lambda: dt.datetime.now().timestamp())
         self.hook_sessions: dict[Path, str] = {}  # Claude home -> session id from its latest hook
         self._rollout_meta: dict[Path, dict] = {}
+        self._user_rollouts: dict[Path, set[Path]] = {}  # sessions root -> main-thread rollouts seen there
 
     # ---- processes ----------------------------------------------------------------------------
 
@@ -178,35 +212,36 @@ class Discovery:
         return max(files, key=lambda p: p.stat().st_mtime).stem if files else None
 
     def codex_sessions(self, home: Path, cwd: Path) -> list[tuple[float, float, str]]:
-        """The user sessions under cwd from the last few days, as (mtime, started, id), newest written first."""
+        """The user sessions under cwd that are recent or still written, as (mtime, started, id), newest written
+        first. The first look at a home searches every day folder (see rollout_files)."""
         root = home / "sessions"
-        today = dt.date.today()
+        first = root not in self._user_rollouts
+        known = self._user_rollouts.setdefault(root, set())
         found: list[tuple[float, float, str]] = []
-        for delta in (-2, -1, 0, 1):
-            d = today + dt.timedelta(days=delta)
-            day = root / f"{d.year:04d}" / f"{d.month:02d}" / f"{d.day:02d}"
-            if not day.is_dir():
+        for p in rollout_files(root, every_day=first, known=known):
+            meta = self._rollout_meta.get(p)
+            if meta is None:
+                try:
+                    with p.open() as f:
+                        meta = rollout_meta(f.readline())
+                except OSError:
+                    continue
+                if not meta:
+                    continue
+                self._rollout_meta[p] = meta
+            if meta.get("thread_source") != "user":
                 continue
-            for p in day.glob("rollout-*.jsonl"):
-                meta = self._rollout_meta.get(p)
-                if meta is None:
-                    try:
-                        with p.open() as f:
-                            meta = rollout_meta(f.readline())
-                    except OSError:
-                        continue
-                    if not meta:
-                        continue
-                    self._rollout_meta[p] = meta
-                if meta.get("thread_source") != "user":
-                    continue
-                mcwd = Path(meta.get("cwd", "/nonexistent"))
-                if mcwd != cwd and cwd not in mcwd.parents:
-                    continue
-                sid = meta.get("id") or meta.get("session_id")
-                if sid:
+            known.add(p)  # still a candidate once its day folder is no longer near today
+            mcwd = Path(meta.get("cwd", "/nonexistent"))
+            if mcwd != cwd and cwd not in mcwd.parents:
+                continue
+            sid = meta.get("id") or meta.get("session_id")
+            if sid:
+                try:
                     mtime = p.stat().st_mtime
-                    found.append((mtime, _started(meta.get("timestamp"), mtime), sid))
+                except OSError:
+                    continue
+                found.append((mtime, _started(meta.get("timestamp"), mtime), sid))
         return sorted(found, reverse=True)
 
     def codex_session(self, home: Path, cwd: Path) -> str | None:

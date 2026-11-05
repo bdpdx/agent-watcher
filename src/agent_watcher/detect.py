@@ -313,6 +313,9 @@ CODEX_SCREEN_CAPACITY = re.compile(
     r"|flex capacity unavailable)"
     r"|^\s*[■⚠✗]\s*.*(?:at capacity|overloaded|try again later)", re.I)
 CODEX_WORKING = re.compile(r"esc to interrupt", re.I)
+# Notices Codex prints after a turn has ended, which can land below its error: a background agent finishing, a
+# /model change, and the background-terminal count above the composer
+_CODEX_NOTICE = re.compile(r"^(?:• Completed `|• Model changed to |\d+ background terminals? running\b)")
 _MENU_ITEM = re.compile(r"^\s*(›)?\s*(\d+)\.\s*(.+?)(?:\s+\(|\s{2,}|$)")
 
 
@@ -367,7 +370,8 @@ def codex_screen_capacity(text: str) -> str | None:
 
     The composer is the last line starting with "›" and the user's prompts above it start with "›" too; only the
     few lines after the latest prompt and just above the composer count, so an older error, or one followed by
-    a new prompt ("› continue"), doesn't.
+    a new prompt ("› continue"), doesn't. Notices that arrive after the turn ended (background agents completing,
+    a model change) are skipped, so they can't push the error out of view.
     """
     lines = screen_lines(text)
     if any(CODEX_WORKING.search(ln) for ln in lines):
@@ -376,7 +380,7 @@ def codex_screen_capacity(text: str) -> str | None:
     if not prompts:
         return None
     start = prompts[-2] + 1 if len(prompts) > 1 else 0
-    tail = [ln.strip() for ln in lines[start:prompts[-1]] if ln.strip()][-3:]
+    tail = [s for ln in lines[start:prompts[-1]] if (s := ln.strip()) and not _CODEX_NOTICE.match(s)][-3:]
     return next((ln for ln in reversed(tail) if CODEX_SCREEN_CAPACITY.search(ln)), None)
 
 

@@ -134,6 +134,17 @@ def test_capacity_error_ignored_while_working_or_after_a_new_prompt():
     assert codex_screen_capacity(retried) is None
 
 
+def test_capacity_error_detected_under_later_notices():
+    # codex-r, 2026-11-05: background agents completed after the error and buried it under the composer
+    error = "■ Selected model is at capacity. Please try a different model."
+    notices = "\n\n".join([error] + [f"• Completed `/root/job_{i}`" for i in range(6)] +
+                           ["• Model changed to gpt-6.1-sol medium", "  1 background terminal running · /ps to view"])
+    assert codex_screen_capacity(IDLE_ERROR.replace(error, notices)) == error
+    # real work after the error still pushes it out of view
+    work = "\n\n".join(f"• Started `/root/next_{i}`" for i in range(3))
+    assert codex_screen_capacity(IDLE_ERROR.replace(error, f"{notices}\n\n{work}")) is None
+
+
 def test_agent_reply_quoting_the_error_is_not_detected():
     reply = ("• The previous command only printed “Selected model is at capacity.” There’s no unfinished task in "
              "this conversation. What would you like me to continue?")
