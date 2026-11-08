@@ -6,6 +6,8 @@
 project_state_dir = "~/code/project-state"
 owner_slack_id = "UXXXXXXXX"               # the human developer at this machine's console
 authorized_humans = []                     # other developers this owner authorizes to command this watcher
+# The watcher's one home on this machine: its log, run.out (start.sh), audit log, state and socket all go here, and
+# agents' hooks find the socket here too. Keep the Slack env file here as well.
 state_dir = "~/.agent-watcher"
 
 # Each behavior is off, dry or live. "channel" governs posting to Slack (dry: posts go to audit.log only);
@@ -116,6 +118,6 @@ dialog_regex = "(Allow|Approve).*\\?"
 [slack]
 # This machine's watcher bot. Tokens come from these environment variables, or else from env_file
 # (SLACK_MCP_XOXB_TOKEN / SLACK_MCP_XAPP_TOKEN). A user token (xoxp) in that file is never used.
-env_file = "~/.claude-agent-watcher/slack-mcp-server.env"
+env_file = "~/.agent-watcher/slack-mcp-server.env"
 bot_token_env = "AGENT_WATCHER_SLACK_BOT_TOKEN"
 app_token_env = "AGENT_WATCHER_SLACK_APP_TOKEN"

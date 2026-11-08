@@ -80,7 +80,7 @@ window resets.
 | `cant_continue` | Claude session-level refusal, or repeated safety refusals with no good turn | Careful-sync request (repeated case), then exit + relaunch with a recovery prompt |
 | `channel` | everything above | Posts reports and restart progress (compactions are only tracked, in `compactions.jsonl`) |
 
-Every keystroke behavior starts in `dry` mode ("would do X" in `~/.agent-watcher/audit.log`). Switch them to
+Every keystroke behavior starts in `dry` mode ("would do X" in `audit.log` in `state_dir`). Switch them to
 `live` one at a time. `channel = "live"` with keystrokes `dry` lets the GM see reports without anything being
 typed; acknowledgements say "dry mode: nothing typed".
 
@@ -124,8 +124,9 @@ Thread replies count only under the watcher's own posts. Refused and owner-only 
    (`libnotify-bin`), and always go to `watcher.log`. On a machine with no desktop, set `[notify] command` in
    `watcher.toml` or anything sent only there is seen only in the log.
 7. **Local control.** `agent-watcher status`, `restart <agent>|cohort:<project>`, `usage <agent>` (read `/usage` once idle), `pause [agent]`,
-   `resume [agent]`. Each finds the daemon through `--config` (default `watcher.toml`): its `state_dir` holds the
-   socket. `AGENT_WATCHER_SOCK` overrides it.
+   `resume [agent]`. Each finds the daemon through `--config` (default: `$AGENT_WATCHER_CONFIG`, else
+   `./watcher.toml`, else the checkout's `watcher.toml`): its `state_dir` holds the socket. Hooks and the status
+   line find it the same way. `AGENT_WATCHER_SOCK` overrides it.
 
 ## Before going live
 

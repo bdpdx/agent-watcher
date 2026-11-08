@@ -6,6 +6,9 @@
   agent-watcher install-statusline HOME [--dry-run]
   agent-watcher status | restart <agent>|cohort:<project> | pause [agent] | resume [agent] | usage <agent>
                 [--config watcher.toml]      (finds the daemon's socket in the config's state_dir)
+
+Without --config, the config is $AGENT_WATCHER_CONFIG, else ./watcher.toml, else the checkout's watcher.toml. Hooks
+and the status line find the daemon's socket the same way, so everything the watcher writes stays in state_dir.
 """
 
 from __future__ import annotations
@@ -46,9 +49,20 @@ def _send(msg: dict, want_reply: bool, timeout: float) -> dict | None:
         s.close()
 
 
-def _use_config_socket(config_path: Path) -> None:
-    """Point the control commands at the daemon that `run --config` started: its socket is in state_dir.
-    AGENT_WATCHER_SOCK, when set, still wins."""
+REPO_CONFIG = Path(__file__).resolve().parents[2] / "watcher.toml"  # the checkout's own watcher.toml
+
+
+def default_config() -> Path:
+    if env := os.environ.get("AGENT_WATCHER_CONFIG"):
+        return Path(env).expanduser()
+    local = Path("watcher.toml")
+    return local if local.is_file() else REPO_CONFIG
+
+
+def _use_config_socket(config_path: Path | None = None) -> None:
+    """Point at the daemon that `run --config` started: its socket is in state_dir. AGENT_WATCHER_SOCK, when set,
+    still wins."""
+    config_path = config_path or default_config()
     if os.environ.get("AGENT_WATCHER_SOCK") or not config_path.is_file():
         return
     state_dir = tomllib.loads(config_path.read_text()).get("state_dir", "~/.agent-watcher")
@@ -59,6 +73,7 @@ def hook(kind: str) -> int:
     """Forward a hook payload to the daemon. Always exits 0 and prints nothing: it never decides."""
     try:
         payload = json.loads(sys.stdin.read() or "{}")
+        _use_config_socket()
         if kind == "claude":
             config_dir = os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude"
         else:
@@ -77,6 +92,7 @@ def statusline(then: str | None) -> int:
     try:
         payload = json.loads(data or "{}")
         if payload.get("rate_limits"):
+            _use_config_socket()
             config_dir = os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude"
             _send({"type": "statusline", "kind": "claude", "config_dir": str(Path(config_dir).expanduser()),
                    "payload": {"session_id": payload.get("session_id"), "rate_limits": payload["rate_limits"]}},
@@ -121,7 +137,7 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="agent-watcher")
     sub = p.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run")
-    r.add_argument("--config", default="watcher.toml")
+    r.add_argument("--config", type=Path, help="default: $AGENT_WATCHER_CONFIG, ./watcher.toml, the checkout's")
     r.add_argument("--agents", default="agents.toml")
     r.add_argument("-v", "--verbose", action="store_true")
     h = sub.add_parser("hook")
@@ -132,7 +148,7 @@ def main(argv: list[str] | None = None) -> int:
     ins.add_argument("home", help="a Claude config dir, e.g. ~/.claude-a")
     ins.add_argument("--dry-run", action="store_true")
     ctl = argparse.ArgumentParser(add_help=False)
-    ctl.add_argument("--config", default="watcher.toml", help="the daemon's watcher.toml (for its state_dir)")
+    ctl.add_argument("--config", type=Path, help="the daemon's watcher.toml (for its state_dir)")
     sub.add_parser("status", parents=[ctl])
     rs = sub.add_parser("restart", parents=[ctl])
     rs.add_argument("agent")
@@ -151,7 +167,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "run":
         from . import config
         from .daemon import Daemon
-        cfg = config.load(Path(args.config).expanduser(), Path(args.agents).expanduser())
+        cfg = config.load((args.config or default_config()).expanduser(), Path(args.agents).expanduser())
         cfg.state_dir.mkdir(parents=True, exist_ok=True)
         logging.basicConfig(
             level=logging.DEBUG if args.verbose else logging.INFO,
@@ -163,7 +179,7 @@ def main(argv: list[str] | None = None) -> int:
         os.environ.setdefault("AGENT_WATCHER_SOCK", str(cfg.state_dir / "watcher.sock"))
         asyncio.run(Daemon(cfg).run())
         return 0
-    _use_config_socket(Path(args.config).expanduser())
+    _use_config_socket(args.config.expanduser() if args.config else None)
     try:
         reply = _send({"type": "cmd", "cmd": args.cmd, "arg": getattr(args, "agent", None)}, True, 10.0)
     except OSError as e:
