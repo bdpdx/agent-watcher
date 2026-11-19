@@ -34,7 +34,7 @@ manage = []
 # `model` at the effort after the current one (round-robin), then type `continue`. Labels as the menus show them.
 # confirm_key "s" applies the effort to this session only; "\r" would save it as the home's default.
 [codex_capacity]
-model = "GPT-6.1-Sol"
+model = "GPT-6.2-Sol"
 efforts = ["Medium", "High", "Extra high"]
 confirm_key = "s"
 

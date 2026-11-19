@@ -394,7 +394,7 @@ def menu_items(text: str) -> list[tuple[str, bool, bool]]:
     return out
 
 
-# The status line under the composer starts "<model> <effort> · <dir> · ...", e.g. "GPT-6.1-Sol medium · ~/code/x".
+# The status line under the composer starts "<model> <effort> · <dir> · ...", e.g. "GPT-6.2-Sol medium · ~/code/x".
 _STATUS_EFFORT = re.compile(r"^\s*(\S.*?) (minimal|low|medium|high|xhigh|max|ultra) · ")
 _EFFORT_LABELS = {"xhigh": "Extra high"}
 
@@ -409,7 +409,7 @@ def codex_status_effort(text: str) -> str | None:
 
 
 def codex_status_model(text: str) -> str | None:
-    """The session's model from the Codex status line ("GPT-6.1-Sol", "Daybreak Blue")."""
+    """The session's model from the Codex status line ("GPT-6.2-Sol", "Daybreak Blue")."""
     for ln in reversed(screen_lines(text)):
         if m := _STATUS_EFFORT.match(ln):
             return m.group(1)
