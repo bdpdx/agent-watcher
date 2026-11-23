@@ -1,6 +1,7 @@
 """Codex capacity errors read from the TUI screen, and the /model switch before `continue`."""
 
 import json
+from pathlib import Path
 
 from agent_watcher.actuator import Actuator
 from agent_watcher.config import ModelRotation
@@ -54,7 +55,10 @@ class FakeCodexTUI(FakeTerminal):
                 continue
             mark = "›" if i == self.sel else " "
             cur = " (current)" if label == current else ""
-            out.append(f"{mark}\x00{i + 1}.\x00{label}{cur}\x00\x00\x00{desc}")
+            if mark == "›" and i + 1 >= 10:  # Codex drops a selected item's number from 10 on
+                out.append(f"›\x00\x00\x00\x00\x00{label}{cur}\x00\x00\x00{desc}")
+            else:
+                out.append(f"{mark}\x00{i + 1}.\x00{label}{cur}\x00\x00\x00{desc}")
         return "\n".join(out + [" ", "  enter select · esc back"])
 
     async def screen_text(self, agent):
@@ -347,6 +351,34 @@ async def test_select_scrolls_a_long_menu_to_an_item_off_screen(tmp_path):
     assert [lbl for lbl, _, _ in menu_items(await tui.screen_text("codex-g"))][-1] == "GPT-6-Luna"  # 5 of 9 show
     assert await act._select("codex-g", "Daybreak Blue") and LONG_MODELS[tui.sel][0] == "Daybreak Blue"
     assert await act._select("codex-g", "GPT-6-Astra") and tui.sel == 1  # back up, onto one that shows
+
+
+# The /model list as of 2026-11-22: eleven models, Daybreak Blue last. Selected, items 10 and 11 show no number.
+ELEVEN_MODELS = [(m, "") for m in ("GPT-6.2-Sol", "GPT-6.2-Astra", "GPT-6.1 Terra", "GPT-6.1-Sol", "GPT-6-Astra",
+                                   "GPT-6-Sol", "GPT-6-Luna", "GPT-5.6-Sol", "GPT-5.6-Terra", "GPT-5.6-Luna",
+                                   "Daybreak Blue")]
+
+
+def test_menu_items_reads_a_selected_item_past_nine_from_a_real_screen():
+    from agent_watcher.detect import menu_items
+    screen = (Path(__file__).parent / "codex_model_menu_screen.txt").read_text()
+    items = menu_items(screen)
+    assert [lbl for lbl, _, _ in items][0] == "GPT-6.1 Terra" and len(items) == 8
+    assert items[-1] == ("GPT-5.6-Luna", True, False)
+
+
+def test_menu_items_ignores_the_composer():
+    from agent_watcher.detect import menu_items
+    assert menu_items("› Ask Codex to do anything\n› /model  choose what model and reasoning effort to use") == []
+
+
+async def test_select_reaches_a_model_past_ninth(tmp_path):
+    tui = FakeCodexTUI(models=ELEVEN_MODELS, rows=8)
+    cfg, act, _ = make(tmp_path, tui)
+    tui.state = "models"
+    assert await act._select("codex-g", "Daybreak Blue") and tui.sel == 10
+    assert await act._select("codex-g", "GPT-5.6-Luna") and tui.sel == 9
+    assert await act._select("codex-g", "GPT-6.2-Astra") and tui.sel == 1
 
 
 async def test_select_gives_up_on_a_model_not_in_the_menu(tmp_path):

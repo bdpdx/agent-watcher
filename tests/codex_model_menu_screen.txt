@@ -1,0 +1,14 @@
+ 
+  Select Model and Effort
+
+↑
+  3. GPT-6.1 Terra          Efficient model that excels at visual understanding and computer use.
+  4. GPT-6.1-Sol            Previous generation model for coding and everyday work.
+  5. GPT-6-Astra            Previous generation model for complex coding and professional work.
+  6. GPT-6-Sol              Legacy model for coding and everyday work.
+  7. GPT-6-Luna             Fast and affordable model for easier tasks.
+  8. GPT-5.6-Sol            Legacy model for coding and everyday work.
+  9. GPT-5.6-Terra          Legacy balanced model for agentic coding.
+›     GPT-5.6-Luna          Legacy fast model for simpler tasks.
+↓
+  enter select · esc back

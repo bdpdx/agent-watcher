@@ -317,6 +317,9 @@ CODEX_WORKING = re.compile(r"esc to interrupt", re.I)
 # /model change, and the background-terminal count above the composer
 _CODEX_NOTICE = re.compile(r"^(?:• Completed `|• Model changed to |\d+ background terminals? running\b)")
 _MENU_ITEM = re.compile(r"^\s*(›)?\s*(\d+)\.\s*(.+?)(?:\s+\(|\s{2,}|$)")
+# Codex drops the number of a selected item from 10 on ("›     GPT-5.6-Luna   Legacy fast…"). Two or more spaces after
+# the marker keep the composer ("› Ask Codex…", "› /model  choose…") from matching.
+_MENU_ITEM_UNNUMBERED = re.compile(r"^\s*(›)\s{2,}()(\S.*?)(?:\s+\(|\s{2,}|$)")
 
 
 def screen_lines(text: str) -> list[str]:
@@ -388,7 +391,7 @@ def menu_items(text: str) -> list[tuple[str, bool, bool]]:
     """(label, selected, current) for each numbered item of a Codex selection menu on screen."""
     out = []
     for ln in screen_lines(text):
-        m = _MENU_ITEM.match(ln)
+        m = _MENU_ITEM.match(ln) or _MENU_ITEM_UNNUMBERED.match(ln)
         if m:
             out.append((m.group(3).strip(), bool(m.group(1)), "(current)" in ln))
     return out
