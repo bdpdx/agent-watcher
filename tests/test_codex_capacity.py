@@ -500,3 +500,76 @@ async def test_cyber_block_without_a_configured_model_notifies(tmp_path):
     await sup.handle(ev)
     await settle(10)
     assert "codex-g" not in tui.sent and "It needs you" in sup.notifier.notes[-1]
+
+
+def project_supervisor(tmp_path, tui, cyber_agents):
+    from .conftest import P1
+    cfg, act, _ = make(tmp_path, tui)
+    cfg.codex_cyber, cfg.codex_cyber_agents = CYBER, cyber_agents
+    sup = Supervisor(cfg, tui, act, FakeChannel(), FakeNotifier())
+    sup.apply_discovery([record(tmp_path, "codex-g", P1, home=tmp_path / ".codex-g")])
+    assert sup.agents["codex-g"].project == P1
+    return cfg, sup
+
+
+async def test_cyber_block_without_access_asks_it_to_sync_for_a_restart(tmp_path):
+    tui = FakeCodexTUI(effort="Medium", error=False)
+    cfg, sup = project_supervisor(tmp_path, tui, ["codex-r", "codex-r1"])  # codex-g has no access
+    [ev] = from_codex_main_line(task_complete("cyber_policy", "flagged for possible cybersecurity risk"), "codex-g")
+    await sup.handle(ev)
+    await settle(30)
+    assert tui.model == "GPT-6.1-Sol" and "/model" not in tui.sent["codex-g"]  # no switch attempted
+    assert tui.lines("codex-g") == [TEXT[T.CYBER_RESET]]
+    posts = [text for _, text, _ in sup.channel.posts]
+    assert any("no access to Daybreak Blue" in p and "`restart codex-g`" in p for p in posts)
+    assert any("asked to tell the GM" in p for p in posts)
+    assert [a["action"] for a in audit(cfg)] == ["CYBER_RESET"]
+
+
+async def test_cyber_block_with_access_still_switches(tmp_path):
+    tui = FakeCodexTUI(effort="Medium", error=False)
+    cfg, sup = project_supervisor(tmp_path, tui, ["codex-g"])
+    [ev] = from_codex_main_line(task_complete("cyber_policy", "flagged for possible cybersecurity risk"), "codex-g")
+    await sup.handle(ev)
+    await settle(30)
+    assert tui.model == "Daybreak Blue" and TEXT[T.CONTINUE_CYBER] in tui.lines("codex-g")
+    assert TEXT[T.CYBER_RESET] not in tui.lines("codex-g")
+
+
+async def test_cyber_block_with_no_cyber_model_asks_it_to_sync_for_a_restart(tmp_path):
+    tui = FakeCodexTUI(effort="Medium", error=False)
+    cfg, sup = project_supervisor(tmp_path, tui, None)
+    cfg.codex_cyber = None  # no [codex_cyber] at all: nobody has a model to switch to
+    [ev] = from_codex_main_line(task_complete("cyber_policy", "flagged for possible cybersecurity risk"), "codex-g")
+    await sup.handle(ev)
+    await settle(30)
+    assert tui.lines("codex-g") == [TEXT[T.CYBER_RESET]]
+    assert any("no access to a cybersecurity model" in text for _, text, _ in sup.channel.posts)
+
+
+async def test_cyber_block_without_access_waits_if_the_turn_was_restarted(tmp_path):
+    tui = FakeCodexTUI(effort="Medium", error=False)
+    cfg, sup = project_supervisor(tmp_path, tui, [])
+    [ev] = from_codex_main_line(task_complete("cyber_policy", "flagged for possible cybersecurity risk"), "codex-g")
+    await sup.handle(ev)
+    sup.agents["codex-g"].last_working = ev.ts + 1  # someone typed into it before the delay ran out
+    await settle(30)
+    assert "codex-g" not in tui.sent
+
+
+def test_cyber_agents_from_config(tmp_path):
+    import pytest
+    from agent_watcher.config import load
+    f = tmp_path / "w.toml"
+    base = 'project_state_dir = "/x"\nowner_slack_id = "U"\n[codex_cyber]\nmodel = "Daybreak Blue"\n'
+    f.write_text(base + 'agents = ["codex-r", "codex-r1"]\n')
+    cfg = load(f)
+    assert cfg.codex_cyber_agents == ["codex-r", "codex-r1"]
+    assert cfg.has_cyber_model("codex-r1") and not cfg.has_cyber_model("codex-f")
+    f.write_text(base)
+    assert load(f).has_cyber_model("codex-f")  # no list: every agent has access
+    f.write_text('project_state_dir = "/x"\nowner_slack_id = "U"\n')
+    assert not load(f).has_cyber_model("codex-r")  # no [codex_cyber]: nobody does
+    f.write_text(base + 'agents = "codex-r"\n')
+    with pytest.raises(ValueError, match="agents must be a list"):
+        load(f)

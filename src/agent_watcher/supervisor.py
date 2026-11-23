@@ -1094,19 +1094,34 @@ class Supervisor:
         t = self.cfg.timing
         recent = [f for f in st.safety_flags if f > max(ev.ts - t.cant_continue_window_s, st.last_good_turn)]
         rot = self.cfg.codex_cyber
-        switch = rot and ev.data.get("error") == "cyber_policy" and self.cfg.agents[st.name].kind == "codex" \
+        first_codex_block = ev.data.get("error") == "cyber_policy" and self.cfg.agents[st.name].kind == "codex" \
             and len(recent) == 1 and self.active(st.name) and not (st.retry_task and not st.retry_task.done())
-        retry = (f" Switching it to {rot.model} and retrying the turn in the next "
-                 f"{max(1, round(t.capacity_first_delay_s))} seconds, so don't reassign its work."
-                 if switch and self.cfg.mode("cyber_switch") == "live" else "")
+        access = self.cfg.has_cyber_model(st.name)
+        switch = first_codex_block and access
+        # No access to the [codex_cyber] model: the session can't get past the block, so it hands off and the GM
+        # restarts it. Outside a project there is no GM; that is left to the owner below.
+        reset = first_codex_block and not access and st.project != LOCAL_PROJECT
+        live = self.cfg.mode("cyber_switch") == "live"
+        then = ""
+        if switch and live:
+            then = (f" Switching it to {rot.model} and retrying the turn in the next "
+                    f"{max(1, round(t.capacity_first_delay_s))} seconds, so don't reassign its work.")
+        elif reset and live:
+            then = (f" It has no access to {rot.model if rot else 'a cybersecurity model'}, so it is being asked to "
+                    f"tell the GM, sync, prepare for restart, and say when it is ready. GM: then "
+                    f"`restart {st.name}`.")
         self._post(st.project, f"{st.name}: turn refused by a safety review "
                                f"(\"{clean(ev.data.get('text', ''), 160)}\"), {len(recent)} without a successful turn."
-                               + retry)
+                               + then)
         if switch:
             st.retry_task = self._spawn(self._cyber_switch(st, ev.ts, rot), f"cyber:{st.name}")
             return
+        if reset:
+            st.retry_task = self._spawn(self._cyber_reset(st, ev.ts), f"cyber-reset:{st.name}")
+            return
         if st.project == LOCAL_PROJECT:  # no project to restart into: leave it to the owner
-            why = "again after switching models" if len(recent) > 1 else "no [codex_cyber] model to switch to"
+            why = ("again after switching models" if len(recent) > 1 else
+                   f"no access to {rot.model}" if rot else "no [codex_cyber] model to switch to")
             self._tell(st, f"Stopped by a cybersecurity block ({why}). It needs you.")
             return
         if len(recent) >= t.cant_continue_flags:
@@ -1140,6 +1155,16 @@ class Supervisor:
             back = self.cyber_return.get(st.name)
             self._tell(st, f"Cybersecurity block: switched to {rot.model} and asked it to continue"
                            + (f"; it goes back to {back} after a successful turn." if back else "."))
+
+    async def _cyber_reset(self, st: AgentState, err_ts: float) -> None:
+        """A Codex cyber block on an agent without access to [codex_cyber]: ask it to tell the GM, sync and prepare
+        for restart. The GM restarts it once it says it's ready."""
+        await asyncio.sleep(self.cfg.timing.capacity_first_delay_s)
+        if st.last_working > err_ts or st.name not in self.agents or not self.active(st.name):
+            return  # someone already restarted the turn
+        if await self.act.type(st.name, "cyber_switch", T.CYBER_RESET, why="cybersecurity block, no cyber model"):
+            self._tell(st, "asked to tell the GM it can't recover from the cybersecurity block, sync and prepare "
+                           "for restart.")
 
     async def _cyber_switch_back(self, st: AgentState) -> None:
         """A good turn on [codex_cyber]: back to the model it had before the block, at the session's effort."""

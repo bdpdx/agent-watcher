@@ -48,6 +48,12 @@ model the session had (from the status line; else `[codex_capacity]` model). A s
 turn gets no second switch: in a project the GM sees the refusals in the channel (and `cant_continue` applies),
 otherwise the owner is notified.
 
+Only the agents listed in `[codex_cyber] agents` have access to that model; with no list, every Codex agent does.
+An agent in a project without access (or with no `[codex_cyber]` at all) can't get past the block, so instead of
+switching the watcher tells it that its context needs a reset: tell the GM it was blocked and can't recover, sync,
+prepare for restart, and tell the GM when it's ready. The GM then sends `restart <agent>`. Outside a project the
+owner is notified.
+
 ## Usage limits
 
 The watcher tracks each agent's plan limits without asking the agent:

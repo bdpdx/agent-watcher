@@ -42,10 +42,14 @@ confirm_key = "s"
 # effort (efforts = [] ; list labels to rotate instead), then ask it to continue in plain development terms. After
 # its next successful turn it switches back to the model it had (else [codex_capacity] model). Blocked again before
 # a successful turn: no second switch; in a project that's left to the GM, otherwise the owner is notified.
+# `agents` lists the agents whose accounts have access to the model (omit it: all of them). An agent in a project
+# without access is told instead to tell the GM it can't recover, sync, prepare for restart, and say when it's
+# ready; the GM then restarts it.
 [codex_cyber]
 model = "Daybreak Blue"
 efforts = []
 confirm_key = "s"
+agents = ["codex-r", "codex-r1"]
 
 # Plan usage limits. Codex: from its rollouts. Claude: session and weekly from the status line (install with
 # `agent-watcher install-statusline <home>`), per-model weeks (Fable) by reading /usage (behavior usage_check):

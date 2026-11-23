@@ -134,6 +134,7 @@ class WatcherConfig:
     local_kinds: list[str] = field(default_factory=list)  # kinds managed without a Slack project ([local] manage)
     codex_rotation: ModelRotation | None = None  # [codex_capacity]
     codex_cyber: ModelRotation | None = None  # [codex_cyber]: the model a Codex agent moves to after a cyber block
+    codex_cyber_agents: list[str] | None = None  # [codex_cyber] agents: who has access to it; None = every agent
     usage_report_left_pct: list[int] = field(default_factory=lambda: [25, 15, 10, 5])  # [usage] report_left_pct
     usage_intro_wait_s: float = 15 * 60  # post the join line with what's known after this long
     gm_usage_delay_s: float = 60  # when the GM joins, wait this long for readings, then post every agent's usage
@@ -166,6 +167,10 @@ class WatcherConfig:
 
     def mode(self, behavior: str) -> Mode:
         return self.modes.get(behavior, "off")
+
+    def has_cyber_model(self, agent: str) -> bool:
+        """Whether `agent` can be switched to the [codex_cyber] model (its account has access to it)."""
+        return self.codex_cyber is not None and (self.codex_cyber_agents is None or agent in self.codex_cyber_agents)
 
     def agent_for_config_dir(self, config_dir: str | Path) -> AgentConfig | None:
         d = _path(config_dir).resolve()
@@ -236,6 +241,11 @@ def load(watcher_path: Path, agents_path: Path | None = None) -> WatcherConfig:
             raise ValueError(f"[{section}] needs efforts")
         return ModelRotation(rot["model"], list(rot.get("efforts", [])), rot.get("confirm_key", "s"))
 
+    cyber_agents = raw.get("codex_cyber", {}).get("agents")
+    if cyber_agents is not None and (not isinstance(cyber_agents, list)
+                                     or not all(isinstance(a, str) for a in cyber_agents)):
+        raise ValueError("[codex_cyber] agents must be a list of agent names")
+
     return WatcherConfig(
         project_state_dir=_path(raw["project_state_dir"]),
         owner_slack_id=raw["owner_slack_id"],
@@ -258,6 +268,7 @@ def load(watcher_path: Path, agents_path: Path | None = None) -> WatcherConfig:
         local_kinds=local_kinds,
         codex_rotation=rotation("codex_capacity", need_efforts=True),
         codex_cyber=rotation("codex_cyber", need_efforts=False),
+        codex_cyber_agents=cyber_agents,
         notify_command=notify_command,
         start_script=raw.get("launch", {}).get("start_script") or None,
         assess=AssessConfig(**{k: v for k, v in raw.get("assess", {}).items()

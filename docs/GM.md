@@ -30,7 +30,8 @@ still restart or move it. Watchers say `Now watching <agent>` and `No longer wat
 - **Capacity / disconnect retries**, **safety refusals**, **session refusals and recovery relaunches**. On a Codex
   cybersecurity block the watcher switches the agent to the cybersecurity model, asks it to continue, and switches
   it back after its next successful turn; it posts each step. If the agent is blocked again before a successful turn,
-  it's yours to handle.
+  it's yours to handle. An agent whose account has no access to that model is instead asked to tell you it was
+  blocked and can't recover, sync, prepare for restart, and tell you when it's ready: then post `restart <agent>`.
 - **Usage**: each agent's plan limits (session, week, per-model week) when it joins, and every agent's again
   (`Usage, for <gm>: …`) about a minute after you join or post `gm <your name>`, so a fresh session sees them
   without reading back.

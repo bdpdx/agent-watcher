@@ -25,6 +25,7 @@ class T(str, Enum):
     STOP_BACKGROUND = "STOP_BACKGROUND"
     MODEL_MENU = "MODEL_MENU"
     CONTINUE_CYBER = "CONTINUE_CYBER"
+    CYBER_RESET = "CYBER_RESET"
     USAGE_SCREEN = "USAGE_SCREEN"
 
 
@@ -45,6 +46,12 @@ TEXT: dict[T, str] = {
     T.CONTINUE_CYBER: (
         "Your last turn was stopped by the cybersecurity filter. Continue your work, and describe it in plain "
         "development terms."
+    ),
+    T.CYBER_RESET: (  # a Codex agent without access to the [codex_cyber] model
+        "Your last turn was blocked by a cybersecurity warning, and this session can't recover from it: its "
+        "context needs to be reset. Tell the GM now that you were blocked by a cybersecurity warning, cannot "
+        "recover, and are preparing to sync and restart. Then immediately sync, cleanup, and prepare for restart, "
+        "and tell the GM when you are ready to be restarted. The GM will then have agent-watcher restart you."
     ),
     T.USAGE_SCREEN: "/usage",  # Claude; read, then closed with Esc
 }
