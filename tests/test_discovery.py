@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_watcher.discovery import Discovery, linux_proc_info, transcript_dir
+from agent_watcher.discovery import Discovery, linux_proc_info, one_shot, transcript_dir
 
 HOME = str(Path.home())
 
@@ -181,11 +181,11 @@ def test_linux_proc_info_of_a_real_process(tmp_path):
     assert info.argv == ["sleep", "30"] and info.env["TMUX_PANE"] == "%9" and info.cwd == tmp_path.resolve()
 
 
-def linux_discovery(monkeypatch, tmp_path, env):
+def linux_discovery(monkeypatch, tmp_path, env, argv=("claude",)):
     """A Linux scan of one `claude` process with a fake ps and pgrep."""
     monkeypatch.setattr("agent_watcher.discovery.linux_proc_info",
                         lambda pid: linux_proc_info(pid, tmp_path / "proc"))
-    fake_proc(tmp_path / "proc", 10, ["claude"], env, tmp_path)
+    fake_proc(tmp_path / "proc", 10, list(argv), env, tmp_path)
     return Discovery(lambda cmd: {"pgrep": "10\n" if cmd[-1] == "claude" else "", "ps": "pts/1\n"}[cmd[0]],
                      platform="linux")
 
@@ -216,3 +216,19 @@ def test_start_script_is_used_to_relaunch_when_present(tmp_path):
     assert launch_command(a.launch, "demo-project") == f"{script} 'join project demo-project'"
     b = cfg.agent_config("codex-k", "codex", r.home, r.cwd, r.launch_command())  # no script: rebuilt command
     assert b.launch == r.launch_command()
+
+
+def test_linux_scan_skips_a_claude_print_run(tmp_path, monkeypatch):
+    """The watcher's `claude -p` second opinion inherits its tmux pane; it isn't a second session on that home
+    (2026-11-24: a 1:1:1 warning for ~/.claude)."""
+    argv = ("claude", "-p", "--model", "claude-haiku-5-5", "--tools", "", "--strict-mcp-config")
+    assert linux_discovery(monkeypatch, tmp_path, {"TMUX": "/tmp/s,1,0", "TMUX_PANE": "%10"}, argv).scan() == []
+
+
+def test_one_shot_runs():
+    assert one_shot("claude", ["claude", "-p", "hi"]) and one_shot("claude", ["claude", "--print"])
+    assert not one_shot("claude", ["claude", "--dangerously-skip-permissions", "join project p"])
+    assert one_shot("codex", ["codex", "exec", "fix it"]) and one_shot("codex", ["codex", "-C", "/x", "e", "go"])
+    assert not one_shot("codex", ["codex", "-p", "exec", "--remote", "unix://"])  # -p is --profile; "exec" its value
+    assert not one_shot("codex", ["codex", "--remote", "unix://", "-C", "/r", "--dangerously-bypass-approvals"])
+    assert not one_shot("codex", ["codex", "join project p"])

@@ -38,6 +38,21 @@ _CODEX_FLAGS = {"--remote": True, "-C": True, "--cd": True, "-m": True, "--model
                 "-a": True, "--ask-for-approval": True, "--search": False, "--oss": False}
 
 
+def one_shot(kind: str, argv: list[str]) -> bool:
+    """A non-interactive run, not an agent session: `claude -p`/`--print`, or `codex exec` (alias `e`). Codex's -p is
+    --profile, so only its subcommand counts: the first argument that isn't a flag or a flag's value."""
+    args = argv[1:]
+    if kind == "claude":
+        return any(a in ("-p", "--print") or a.startswith("--print=") for a in args)
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if not a.startswith("-"):
+            return a in ("exec", "e")
+        i += 2 if _CODEX_FLAGS.get(a.split("=", 1)[0]) and "=" not in a else 1
+    return False
+
+
 def run_cmd(cmd: list[str]) -> str:
     try:
         return subprocess.run(cmd, capture_output=True, text=True, timeout=10).stdout
@@ -199,6 +214,8 @@ class Discovery:
         term_id = f"tmux:{pane}" if pane else f"iterm:{guid}" if guid else None
         if not term_id:
             return None  # not in a tmux pane or an iTerm2 tab (e.g. the Codex app-server)
+        if one_shot(kind, info.argv):
+            return None  # e.g. the watcher's own `claude -p` second opinion, which inherits its tmux pane
         home = Path(env.get(HOME_VARS[kind]) or DEFAULT_HOMES[kind]).expanduser()
         return AgentRecord(kind, home, pid, term_id, info.cwd, info.argv)
 
