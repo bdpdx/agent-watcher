@@ -1150,12 +1150,6 @@ class Supervisor:
             if back := before or regular:
                 self.cyber_return[st.name] = back
                 self._save_state()
-        # The model alone isn't enough: Daybreak must be on too, and Codex turns it off when a session moves to a model
-        # without it (as on the switch back). /daybreak turns it on; if that isn't confirmed, nothing more is typed.
-        if switched and not await self.act.codex_daybreak_on(st.name, behavior, why="cybersecurity block") and live:
-            self._tell(st, f"Cybersecurity block: switched to {rot.model}, but Daybreak didn't turn on with /daybreak; "
-                           "nothing more typed. It needs you.")
-            return
         await self.act.type(st.name, behavior, T.CONTINUE_CYBER, why="cybersecurity block")
         if live:
             back = self.cyber_return.get(st.name)

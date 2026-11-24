@@ -39,10 +39,8 @@ EFFORTS = [("Low", "Fast responses with lighter reasoning"), ("Medium", "Balance
 class FakeCodexTUI(FakeTerminal):
     """Enough of Codex's composer and /model menus to drive them. Renders NULs where iTerm2 does."""
 
-    def __init__(self, effort="Medium", error=True, models=None, rows=None, wrap=False, slow_close=0, daybreak=False,
-                 daybreak_works=True):
+    def __init__(self, effort="Medium", error=True, models=None, rows=None, wrap=False, slow_close=0):
         super().__init__()
-        self.daybreak, self.daybreak_works, self.notices = daybreak, daybreak_works, []  # /daybreak toggles it
         self.wrap, self.slow_close, self.closing = wrap, slow_close, 0  # slow_close: reads the effort menu lingers
         self.effort, self.error = effort, error
         self.models, self.rows, self.top = models or MODELS, rows, 0  # rows: how many items show at once
@@ -57,8 +55,8 @@ class FakeCodexTUI(FakeTerminal):
                 continue
             mark = "›" if i == self.sel else " "
             cur = " (current)" if label == current else ""
-            if mark == "›" and i + 1 >= 10:  # Codex drops a selected item's number from 10 on
-                out.append(f"›\x00\x00\x00\x00\x00{label}{cur}\x00\x00\x00{desc}")
+            if i + 1 >= 10:  # Codex shows no number from item 10 on, selected or not
+                out.append(f"{mark}\x00\x00\x00\x00\x00{label}{cur}\x00\x00\x00{desc}")
             else:
                 out.append(f"{mark}\x00{i + 1}.\x00{label}{cur}\x00\x00\x00{desc}")
         return "\n".join(out + [" ", "  enter select · esc back"])
@@ -74,10 +72,8 @@ class FakeCodexTUI(FakeTerminal):
         if self.state == "efforts":
             return self._menu(f"Select Reasoning Level for {self.model}", EFFORTS, self.effort)
         top = "■ Selected model is at capacity. Please try a different model." if self.error else "• Done."
-        popup = "› /model  choose what model and reasoning effort to use\n \n" if self.buf.startswith("/model") else \
-            "› /daybreak  Enable broader access for cybersecurity work\n \n" if self.buf.startswith("/daybreak") else ""
+        popup = "› /model  choose what model and reasoning effort to use\n \n" if self.buf.startswith("/model") else ""
         word = {"Extra high": "xhigh"}.get(self.effort, self.effort.lower())
-        top = "\n".join([top] + self.notices)
         return f"{top}\n \n{popup}› {self.buf or 'Ask Codex to do anything'}\n \n{STATUS.format(effort=word)}"
 
     async def send_raw(self, agent, data):
@@ -86,11 +82,6 @@ class FakeCodexTUI(FakeTerminal):
             if data == "\r":
                 if self.buf == "/model":
                     self.state, self.sel, self.top, self.buf = "models", 0, 0, ""
-                elif self.buf == "/daybreak":
-                    self.buf = ""
-                    if self.daybreak_works:
-                        self.daybreak = not self.daybreak
-                        self.notices.append(f"• Daybreak {'on' if self.daybreak else 'off'}. Applies to new turns.")
                 elif self.buf:
                     self.buf, self.error = "", False
             elif data == "\x7f" * len(data):
@@ -362,7 +353,7 @@ async def test_select_scrolls_a_long_menu_to_an_item_off_screen(tmp_path):
     assert await act._select("codex-g", "GPT-6-Astra") and tui.sel == 1  # back up, onto one that shows
 
 
-# The /model list as of 2026-11-22: eleven models, Daybreak Blue last. Selected, items 10 and 11 show no number.
+# The /model list as of 2026-11-22: eleven models, Daybreak Blue last. Items 10 and 11 show no number.
 ELEVEN_MODELS = [(m, "") for m in ("GPT-6.2-Sol", "GPT-6.2-Astra", "GPT-6.1 Terra", "GPT-6.1-Sol", "GPT-6-Astra",
                                    "GPT-6-Sol", "GPT-6-Luna", "GPT-5.6-Sol", "GPT-5.6-Terra", "GPT-5.6-Luna",
                                    "Daybreak Blue")]
@@ -582,36 +573,3 @@ def test_cyber_agents_from_config(tmp_path):
     f.write_text(base + 'agents = "codex-r"\n')
     with pytest.raises(ValueError, match="agents must be a list"):
         load(f)
-
-
-async def cyber_block(tmp_path, tui):
-    cfg, sup = supervisor(tmp_path, tui)
-    cfg.codex_cyber = CYBER
-    [ev] = from_codex_main_line(task_complete("cyber_policy", "flagged for possible cybersecurity risk"), "codex-g")
-    await sup.handle(ev)
-    await settle(40)
-    return cfg, sup
-
-
-async def test_cyber_switch_turns_daybreak_on_before_continuing(tmp_path):
-    tui = FakeCodexTUI(effort="Medium", error=False)
-    cfg, sup = await cyber_block(tmp_path, tui)
-    assert tui.model == "Daybreak Blue" and tui.daybreak
-    assert tui.lines("codex-g")[-2:] == ["/daybreak", TEXT[T.CONTINUE_CYBER]]
-    assert [a["detail"] for a in audit(cfg) if a["action"] == "DAYBREAK"] == ["Daybreak on"]
-
-
-async def test_cyber_switch_with_daybreak_already_on_leaves_it_on(tmp_path):
-    tui = FakeCodexTUI(effort="Medium", error=False, daybreak=True)
-    cfg, sup = await cyber_block(tmp_path, tui)
-    assert tui.daybreak and tui.lines("codex-g")[-3:] == ["/daybreak", "/daybreak", TEXT[T.CONTINUE_CYBER]]
-
-
-async def test_cyber_switch_stops_if_daybreak_does_not_turn_on(tmp_path):
-    tui = FakeCodexTUI(effort="Medium", error=False, daybreak_works=False)
-    cfg, sup = await cyber_block(tmp_path, tui)
-    assert tui.model == "Daybreak Blue" and not tui.daybreak
-    assert TEXT[T.CONTINUE_CYBER] not in tui.lines("codex-g")
-    assert "Daybreak didn't turn on" in sup.notifier.notes[-1]
-    failed = [a["detail"] for a in audit(cfg) if a["action"] == "DAYBREAK_FAILED"]
-    assert len(failed) == 1 and failed[0].startswith('no "Daybreak on." after /daybreak (screen: ')

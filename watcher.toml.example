@@ -39,8 +39,7 @@ efforts = ["Medium", "High", "Extra high"]
 confirm_key = "s"
 
 # On a Codex cybersecurity block (cyber_policy), switch to this model for the session, keeping the session's
-# effort (efforts = [] ; list labels to rotate instead), turn Daybreak on with /daybreak, then ask it to continue in
-# plain development terms. After
+# effort (efforts = [] ; list labels to rotate instead), then ask it to continue in plain development terms. After
 # its next successful turn it switches back to the model it had (else [codex_capacity] model). Blocked again before
 # a successful turn: no second switch; in a project that's left to the GM, otherwise the owner is notified.
 # `agents` lists the agents whose accounts have access to the model (omit it: all of them). An agent in a project
