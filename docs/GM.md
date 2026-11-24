@@ -28,7 +28,7 @@ still restart or move it. Watchers say `Now watching <agent>` and `No longer wat
   owner-only by rule go straight to the owner. Without
   `gm_assess` on, they aren't posted: they reach the owner through your own Slack approvals.
 - **Capacity / disconnect retries**, **safety refusals**, **session refusals and recovery relaunches**. On a Codex
-  cybersecurity block the watcher switches the agent to the cybersecurity model, asks it to continue, and switches
+  cybersecurity block the watcher switches the agent to the cybersecurity model, turns Daybreak on, asks it to continue, and switches
   it back after its next successful turn; it posts each step. If the agent is blocked again before a successful turn,
   it's yours to handle. An agent whose account has no access to that model is instead asked to tell you it was
   blocked and can't recover, sync, prepare for restart, and tell you when it's ready: then post `restart <agent>`.

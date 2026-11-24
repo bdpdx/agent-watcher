@@ -102,6 +102,7 @@ def make_notifier(command: list[str]) -> Notifier:
 
 
 MODEL_MENU = re.compile(r"Select Model and Effort|Select Reasoning Level")
+_DAYBREAK_NOTICE = re.compile(r"^\s*•\s*Daybreak (on|off)\.")  # "• Daybreak on. Applies to new turns."
 
 
 class Actuator:
@@ -339,6 +340,54 @@ class Actuator:
             ok, detail = await self._model_menus(agent, rot)
         self.audit(agent, behavior, mode, "MODEL_SWITCH" if ok else "MODEL_SWITCH_FAILED", detail, why)
         return ok
+
+    async def codex_daybreak_on(self, agent: str, behavior: str, why: str = "") -> bool:
+        """Turn Codex's Daybreak on with /daybreak (a toggle: "Daybreak on." / "Daybreak off."). The cyber model
+        alone isn't enough; Codex turns Daybreak off by itself when a session moves to a model without it. False,
+        and the screen saved, if Daybreak isn't confirmed on; anything else on screen is left for the owner."""
+        mode = self.cfg.mode(behavior)
+        if mode == "off":
+            return False
+        if mode == "dry" or not self.term.bound(agent):
+            self.audit(agent, behavior, mode if self.term.bound(agent) else "dry", "DAYBREAK", "/daybreak",
+                       why + ("" if self.term.bound(agent) else " [no terminal bound]"))
+            return False
+        async with self.locks[agent]:
+            await self._wait_owner_quiet(agent)
+            ok, detail = await self._daybreak_on(agent)
+            if not ok:
+                shot = await self.save_screen(agent, detail)
+                detail += f" (screen: {shot or 'not saved'})"
+        self.audit(agent, behavior, mode, "DAYBREAK" if ok else "DAYBREAK_FAILED", detail, why)
+        return ok
+
+    async def _daybreak_on(self, agent: str) -> tuple[bool, str]:
+        def notices(text: str) -> list[str]:
+            return [m.group(1) for ln in screen_lines(text) if (m := _DAYBREAK_NOTICE.search(ln))]
+
+        for attempt in range(2):  # it was already on: the first toggle turns it off, the second back on
+            text = await self.term.screen_text(agent)
+            if composer_draft(text, "codex") != "":
+                return False, "the prompt box isn't empty and showing"
+            before = len(notices(text))
+            cmd = render(T.DAYBREAK)
+            await self.term.send_raw(agent, cmd)
+            if await self._screen_shows(agent, r"^\s*›\s*/daybreak\s{2,}\S") is None:  # the command popup
+                await self.term.send_raw(agent, BACKSPACE * len(cmd))
+                return False, "the /daybreak popup did not open"
+            await self.term.send_raw(agent, ENTER)
+            deadline = self.now() + 3 * self.cfg.timing.menu_timeout_s
+            while True:
+                seen = notices(await self.term.screen_text(agent))
+                state = seen[-1] if len(seen) > before else None
+                if state or self.now() >= deadline:
+                    break
+                await asyncio.sleep(self.cfg.timing.menu_step_s)
+            if state == "on":
+                return True, "Daybreak on" + (" (it was on; toggled off and back)" if attempt else "")
+            if state is None:
+                return False, "no \"Daybreak on.\" after /daybreak"
+        return False, "Daybreak stayed off after toggling twice"
 
     async def claude_usage(self, agent: str, behavior: str) -> dict[str, Window] | None:
         """Read Claude's /usage screen (plan usage limits), then close it. None if not read.

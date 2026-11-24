@@ -42,8 +42,9 @@ next effort of `model` (round-robin) through `/model`, then types `continue`. Ea
 screen; if anything is unexpected it backs out, types nothing, and notifies the owner.
 
 On a cybersecurity block (`cyber_policy`), with `[codex_cyber]` set and `cyber_switch` live, it switches the
-session to that model (e.g. Daybreak Blue) at the session's current effort and asks it to continue in plain
-development terms, whether or not the agent is in a project. After the next successful turn it switches back to the
+session to that model (e.g. Daybreak Blue) at the session's current effort, turns Daybreak on with `/daybreak`
+(Codex turns it off by itself on a model without it; if "Daybreak on." doesn't appear, nothing more is typed and
+it's reported), and asks it to continue in plain development terms, whether or not the agent is in a project. After the next successful turn it switches back to the
 model the session had (from the status line; else `[codex_capacity]` model). A second block before a successful
 turn gets no second switch: in a project the GM sees the refusals in the channel (and `cant_continue` applies),
 otherwise the owner is notified.
