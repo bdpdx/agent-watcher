@@ -4,7 +4,8 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")"
 
-if pid=$(pgrep -f 'python[0-9.]* .*agent-watcher run'); then
+# Anchored, as in stop.sh, so a shell whose command line merely mentions the watcher doesn't count as one running.
+if pid=$(pgrep -f '^[^ ]*python[0-9.]* [^ ]*agent-watcher run( |$)'); then
     echo "agent-watcher is already running (PID ${pid//$'\n'/ })" >&2
     exit 1
 fi
