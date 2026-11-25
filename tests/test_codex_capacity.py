@@ -30,6 +30,7 @@ MODELS = [("GPT-6.1-Sol", "Latest workhorse model for coding and everyday work."
           ("GPT-6-Astra", "Frontier intelligence for the most demanding work."),
           ("GPT-6-Sol", "Previous generation workhorse model."),
           ("Daybreak Blue", "Latest frontier agentic coding model for broad defensive cybersecurity work.")]
+DAYBREAK_CHOICES = ["Enable Daybreak", "Not now"]
 EFFORTS = [("Low", "Fast responses with lighter reasoning"), ("Medium", "Balances speed and reasoning depth"),
            ("High", "Greater reasoning depth for complex problems"),
            ("Extra high", "Extra high reasoning depth for complex problems"),
@@ -45,6 +46,7 @@ class FakeCodexTUI(FakeTerminal):
         self.effort, self.error = effort, error
         self.models, self.rows, self.top = models or MODELS, rows, 0  # rows: how many items show at once
         self.state, self.buf, self.sel, self.model = "composer", "", 0, "GPT-6.1-Sol"
+        self.lose_enters, self.daybreak = 0, False
 
     def _menu(self, title, items, current):
         out = [" ", f"  {title}", " "]
@@ -67,6 +69,11 @@ class FakeCodexTUI(FakeTerminal):
             if not self.closing:
                 self.state = "composer"
             return self._menu(f"Select Reasoning Level for {self.model}", EFFORTS, self.effort)
+        if self.state == "daybreak":  # as on the real screen (tests/codex_daybreak_dialog_screen.txt)
+            rows = [f"{'›' if i == self.sel else ' '} {i + 1}. {lbl}" for i, lbl in enumerate(DAYBREAK_CHOICES)]
+            return "\n".join(["ⓘ This content can’t be shown", "  Daybreak is currently off. If you’re doing authorized "
+                              "security work, turn it on and try your request again.", "  Turn on Daybreak for your "
+                              "next request?"] + rows + ["  enter select · esc back"])
         if self.state == "models":
             return self._menu("Select Model and Effort", self.models, self.model)
         if self.state == "efforts":
@@ -79,6 +86,9 @@ class FakeCodexTUI(FakeTerminal):
     async def send_raw(self, agent, data):
         await super().send_raw(agent, data)
         if self.state == "composer":
+            if data == "\r" and self.lose_enters:  # Enter lost while a long paste settles
+                self.lose_enters -= 1
+                return
             if data == "\r":
                 if self.buf == "/model":
                     self.state, self.sel, self.top, self.buf = "models", 0, 0, ""
@@ -88,6 +98,14 @@ class FakeCodexTUI(FakeTerminal):
                 self.buf = self.buf[:-len(data)]
             else:
                 self.buf += data
+            return
+        if self.state == "daybreak":
+            if data in ("\x1b[B", "\x1b[A"):
+                self.sel = 1 - self.sel
+            elif data == "\r":
+                self.daybreak, self.state = self.sel == 0, "composer"
+            elif data == "\x1b":
+                self.state = "composer"
             return
         items = self.models if self.state == "models" else EFFORTS
         if data == "\x1b[B":
@@ -267,7 +285,7 @@ async def test_failed_switch_types_no_continue(tmp_path):
     cfg, sup = supervisor(tmp_path, tui)
     await sup.handle(Event(E.CAPACITY, "codex-g", {"text": "at capacity"}, source="rollout"))
     await settle(30)
-    assert "continue" not in tui.sent["codex-g"] and sup.notifier.notes
+    assert "codex-g" not in tui.sent and sup.notifier.notes  # a draft in the prompt box: nothing typed, not even /model
 
 
 async def test_error_gone_from_screen_cancels_retry(tmp_path):
@@ -447,7 +465,7 @@ async def test_cyber_block_switches_to_daybreak_once(tmp_path):
     [ev] = from_codex_main_line(task_complete("cyber_policy", "flagged", ts="2026-10-19T14:40:00.000Z"), "codex-g")
     await sup.handle(ev)
     await settle(30)
-    assert len(tui.sent["codex-g"]) == sent and "again after switching" in sup.notifier.notes[-1]
+    assert len(tui.sent["codex-g"]) == sent and "again on Daybreak Blue" in sup.notifier.notes[-1]
 
 
 def task_done(ts):
@@ -573,3 +591,102 @@ def test_cyber_agents_from_config(tmp_path):
     f.write_text(base + 'agents = "codex-r"\n')
     with pytest.raises(ValueError, match="agents must be a list"):
         load(f)
+
+
+def test_menu_items_reads_the_real_daybreak_dialog():
+    screen = (Path(__file__).parent / "codex_daybreak_dialog_screen.txt").read_text()
+    assert menu_items(screen) == [("Enable Daybreak", True, False), ("Not now", False, False)]
+
+
+async def daybreak_dialog_block(tmp_path, already_switched=True, sel=0):
+    tui = FakeCodexTUI(effort="Medium", error=False)
+    tui.model, tui.state, tui.sel = "Daybreak Blue", "daybreak", sel
+    cfg, sup = supervisor(tmp_path, tui)
+    cfg.codex_cyber = CYBER
+    if already_switched:
+        sup.cyber_return["codex-g"] = "GPT-6.1-Sol"
+    [ev] = from_codex_main_line(task_complete("cyber_policy", "flagged for possible cybersecurity risk"), "codex-g")
+    await sup.handle(ev)
+    await settle(30)
+    return cfg, sup, tui
+
+
+async def test_cyber_block_on_daybreak_blue_answers_the_daybreak_dialog(tmp_path):
+    """2026-11-24: codex-r and codex-r1, on Daybreak Blue with Daybreak off, were blocked and sat on Codex's
+    "Turn on Daybreak for your next request?" for hours; the watcher only knew to try /model again."""
+    cfg, sup, tui = await daybreak_dialog_block(tmp_path)
+    assert tui.daybreak and tui.state == "composer" and "/model" not in tui.sent["codex-g"]
+    assert tui.lines("codex-g") == [TEXT[T.CONTINUE_CYBER]]
+    assert sup.cyber_return == {"codex-g": "GPT-6.1-Sol"}  # still goes back after a good turn
+    assert "turned Daybreak on" in sup.notifier.notes[-1]
+    assert [a["action"] for a in audit(cfg)] == ["DAYBREAK_ENABLE", "CONTINUE_CYBER"]
+
+
+async def test_daybreak_dialog_is_answered_on_a_first_block_too(tmp_path):
+    cfg, sup, tui = await daybreak_dialog_block(tmp_path, already_switched=False, sel=1)  # selection on "Not now"
+    assert tui.daybreak and "/model" not in tui.sent["codex-g"] and TEXT[T.CONTINUE_CYBER] in tui.lines("codex-g")
+
+
+async def test_blocked_again_on_daybreak_blue_outside_a_project_types_nothing(tmp_path):
+    tui = FakeCodexTUI(effort="Medium", error=False)
+    tui.model = "Daybreak Blue"
+    cfg, sup = supervisor(tmp_path, tui)
+    cfg.codex_cyber = CYBER
+    sup.cyber_return["codex-g"] = "GPT-6.1-Sol"
+    [ev] = from_codex_main_line(task_complete("cyber_policy", "flagged"), "codex-g")
+    await sup.handle(ev)
+    await settle(30)
+    assert "codex-g" not in tui.sent and "again on Daybreak Blue" in sup.notifier.notes[-1]
+
+
+async def test_blocked_again_on_daybreak_blue_in_a_project_hands_off_for_a_restart(tmp_path):
+    """2026-11-24: "Some cybersecurity requests are still limited, even when Daybreak is on." Unrecoverable: the same
+    hand-off as an agent without access, and the relaunch starts on the regular model with Daybreak off."""
+    tui = FakeCodexTUI(effort="Medium", error=False)
+    tui.model = "Daybreak Blue"
+    cfg, sup = project_supervisor(tmp_path, tui, None)
+    sup.cyber_return["codex-g"] = "GPT-6.2-Sol"
+    [ev] = from_codex_main_line(task_complete("cyber_policy", "Some cybersecurity requests are still limited"),
+                                "codex-g")
+    await sup.handle(ev)
+    await settle(30)
+    assert tui.lines("codex-g") == [TEXT[T.CYBER_RESET]] and "/model" not in tui.sent["codex-g"]
+    posts = [text for _, text, _ in sup.channel.posts]
+    assert any("It's on Daybreak Blue already" in p for p in posts)
+    assert any("can't get past" in p and "`restart codex-g`" in p and "restarts on GPT-6.2-Sol" in p for p in posts)
+
+
+async def test_codex_relaunch_starts_on_the_regular_model_with_daybreak_off(tmp_path):
+    tui = FakeCodexTUI(error=False)
+    cfg, sup = project_supervisor(tmp_path, tui, None)
+    home = cfg.agents["codex-g"].config_dir
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "config.toml").write_text('sandbox_mode = "workspace-write"\nmodel = "gpt-daybreak-blue-latest"\n'
+                                      'model_reasoning_effort = "medium"\ndaybreak = true\n[tui]\nx = 1\n')
+    sup.cyber_return["codex-g"] = "GPT-6.2-Sol"
+    sup._codex_launch_defaults(sup.agents["codex-g"], "restart")
+    assert (home / "config.toml").read_text() == ('sandbox_mode = "workspace-write"\nmodel = "gpt-6.2-sol"\n'
+                                                   'model_reasoning_effort = "medium"\ndaybreak = false\n[tui]\nx = 1\n')
+    assert "codex-g" not in sup.cyber_return  # a new session: nothing to switch back
+    assert [a["detail"] for a in audit(cfg) if a["action"] == "LAUNCH_CONFIG"] == \
+        ['daybreak = false, model = "gpt-6.2-sol"']
+
+
+async def test_codex_relaunch_leaves_a_regular_config_alone(tmp_path):
+    tui = FakeCodexTUI(error=False)
+    cfg, sup = project_supervisor(tmp_path, tui, None)
+    home = cfg.agents["codex-g"].config_dir
+    home.mkdir(parents=True, exist_ok=True)
+    text = 'model = "gpt-6.2-sol"\ndaybreak = false\n'
+    (home / "config.toml").write_text(text)
+    sup._codex_launch_defaults(sup.agents["codex-g"], "restart")
+    assert (home / "config.toml").read_text() == text and not (cfg.state_dir / "audit.log").exists()
+
+
+async def test_a_lost_enter_is_pressed_again(tmp_path):
+    """2026-11-24: the long CYBER_RESET paste sat unsent in both Codex prompt boxes; its Enter was lost."""
+    tui = FakeCodexTUI(error=False)
+    tui.lose_enters = 1
+    cfg, act, _ = make(tmp_path, tui)
+    assert await act.type("codex-g", "capacity", T.CYBER_RESET)
+    assert tui.buf == "" and tui.sent["codex-g"].count("\r") == 2

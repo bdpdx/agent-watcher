@@ -102,6 +102,10 @@ def make_notifier(command: list[str]) -> Notifier:
 
 
 MODEL_MENU = re.compile(r"Select Model and Effort|Select Reasoning Level")
+# Codex, on a cyber block while Daybreak is off (even on Daybreak Blue): "Turn on Daybreak for your next request?"
+# over "1. Enable Daybreak" / "2. Not now". It replaces the prompt box until it's answered.
+DAYBREAK_DIALOG = re.compile(r"Turn on Daybreak for your next request\?")
+_DAYBREAK_ENABLE = "Enable Daybreak"
 
 
 class Actuator:
@@ -150,6 +154,19 @@ class Actuator:
         await self.term.send_raw(agent, text)
         await asyncio.sleep(self.cfg.timing.submit_delay_s)
         await self.term.send_raw(agent, "\r")
+        # Enter can be lost while a long paste is still settling: on 2026-11-24 CYBER_RESET sat unsent in both Codex
+        # prompt boxes. While the line is still in the prompt box, press Enter again.
+        a = self.cfg.agents.get(agent)
+        if a is None:
+            return
+        head = " ".join(text.split())[:40]
+        for _ in range(3):
+            await asyncio.sleep(2 * self.cfg.timing.submit_delay_s)
+            draft = composer_draft(await self.term.screen_text(agent), a.kind)
+            if not draft or not " ".join(draft.split()).startswith(head):
+                return
+            log.info("%s: the line is still in the prompt box; pressing Enter again", agent)
+            await self.term.send_raw(agent, "\r")
 
     async def type(self, agent: str, behavior: str, t: T, actions: list[str] | None = None, why: str = "") -> bool:
         """Type a template and submit it. Returns True if actually sent."""
@@ -340,6 +357,39 @@ class Actuator:
         self.audit(agent, behavior, mode, "MODEL_SWITCH" if ok else "MODEL_SWITCH_FAILED", detail, why)
         return ok
 
+    async def daybreak_dialog_showing(self, agent: str) -> bool:
+        return self.term.bound(agent) and bool(DAYBREAK_DIALOG.search(await self.term.screen_text(agent)))
+
+    async def codex_enable_daybreak(self, agent: str, behavior: str, why: str = "") -> bool:
+        """Answer Codex's "Turn on Daybreak for your next request?" with "Enable Daybreak". True once the dialog has
+        closed; False, with the screen saved and nothing more pressed, if it isn't showing or doesn't close."""
+        mode = self.cfg.mode(behavior)
+        if mode == "off":
+            return False
+        if mode == "dry" or not self.term.bound(agent):
+            self.audit(agent, behavior, mode if self.term.bound(agent) else "dry", "DAYBREAK_ENABLE", _DAYBREAK_ENABLE,
+                       why + ("" if self.term.bound(agent) else " [no terminal bound]"))
+            return False
+        async with self.locks[agent]:
+            await self._wait_owner_quiet(agent)
+            ok, detail = await self._enable_daybreak(agent)
+            if not ok:
+                shot = await self.save_screen(agent, detail)
+                detail += f" (screen: {shot or 'not saved'})"
+        self.audit(agent, behavior, mode, "DAYBREAK_ENABLE" if ok else "DAYBREAK_ENABLE_FAILED", detail, why)
+        return ok
+
+    async def _enable_daybreak(self, agent: str) -> tuple[bool, str]:
+        if not DAYBREAK_DIALOG.search(await self.term.screen_text(agent)):
+            return False, "the Daybreak dialog isn't on screen"
+        if not await self._select(agent, _DAYBREAK_ENABLE):
+            return False, f"{_DAYBREAK_ENABLE!r} not found in the Daybreak dialog"
+        await self.term.send_raw(agent, ENTER)
+        if await self._screen_shows(agent, DAYBREAK_DIALOG.pattern, want=False,
+                                    timeout=self.cfg.timing.menu_close_timeout_s) is None:
+            return False, "the Daybreak dialog did not close"
+        return True, _DAYBREAK_ENABLE
+
     async def claude_usage(self, agent: str, behavior: str) -> dict[str, Window] | None:
         """Read Claude's /usage screen (plan usage limits), then close it. None if not read.
 
@@ -459,7 +509,10 @@ class Actuator:
                 await self.term.send_raw(agent, ESC)
             return False, why
 
-        session_effort = codex_status_effort(await self.term.screen_text(agent))
+        text = await self.term.screen_text(agent)
+        if composer_draft(text, "codex") != "":  # a dialog covers it, or a draft is in it: type nothing
+            return False, "the prompt box isn't empty and showing"
+        session_effort = codex_status_effort(text)
         cmd = render(T.MODEL_MENU)
         await self.term.send_raw(agent, cmd)
         if await self._screen_shows(agent, r"^\s*›\s*/model\s+choose what model") is None:

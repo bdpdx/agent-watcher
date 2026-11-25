@@ -32,6 +32,8 @@ still restart or move it. Watchers say `Now watching <agent>` and `No longer wat
   it back after its next successful turn; it posts each step. If the agent is blocked again before a successful turn,
   it's yours to handle. An agent whose account has no access to that model is instead asked to tell you it was
   blocked and can't recover, sync, prepare for restart, and tell you when it's ready: then post `restart <agent>`.
+  The same happens when an agent on the cybersecurity model is blocked again with Daybreak on; it restarts on its
+  regular model.
 - **Usage**: each agent's plan limits (session, week, per-model week) when it joins, and every agent's again
   (`Usage, for <gm>: …`) about a minute after you join or post `gm <your name>`, so a fresh session sees them
   without reading back.

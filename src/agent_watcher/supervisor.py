@@ -37,6 +37,11 @@ from .policy import Policy, Verdict
 from .templates import T, clean, describe_action
 from .usage import LABELS, AgentUsage, Window, fmt_reset, fmt_window, scrape_interval, summary, update
 
+
+def _model_slug(name: str) -> str:
+    """A Codex model's config.toml name from its menu label: "GPT-6.2-Sol" -> "gpt-6.2-sol"."""
+    return name.strip().lower().replace(" ", "-")
+
 log = logging.getLogger(__name__)
 
 LOCAL_PROJECT = "local"  # agents of the [local] manage kinds that haven't joined a watched project
@@ -1094,16 +1099,21 @@ class Supervisor:
         t = self.cfg.timing
         recent = [f for f in st.safety_flags if f > max(ev.ts - t.cant_continue_window_s, st.last_good_turn)]
         rot = self.cfg.codex_cyber
-        first_codex_block = ev.data.get("error") == "cyber_policy" and self.cfg.agents[st.name].kind == "codex" \
-            and len(recent) == 1 and self.active(st.name) and not (st.retry_task and not st.retry_task.done())
+        codex_block = ev.data.get("error") == "cyber_policy" and self.cfg.agents[st.name].kind == "codex" \
+            and self.active(st.name) and not (st.retry_task and not st.retry_task.done())
+        first_codex_block = codex_block and len(recent) == 1
         access = self.cfg.has_cyber_model(st.name)
-        switch = first_codex_block and access
+        on_cyber = st.name in self.cyber_return  # already switched: a block now is Codex asking to turn Daybreak on
+        switch = access and (first_codex_block or (codex_block and on_cyber))
         # No access to the [codex_cyber] model: the session can't get past the block, so it hands off and the GM
         # restarts it. Outside a project there is no GM; that is left to the owner below.
         reset = first_codex_block and not access and st.project != LOCAL_PROJECT
         live = self.cfg.mode("cyber_switch") == "live"
         then = ""
-        if switch and live:
+        if switch and live and on_cyber:
+            then = (f" It's on {rot.model} already: if Codex asks, Daybreak is turned on and the turn retried; if not, "
+                    f"it can't get past this and is asked to sync for a restart.")
+        elif switch and live:
             then = (f" Switching it to {rot.model} and retrying the turn in the next "
                     f"{max(1, round(t.capacity_first_delay_s))} seconds, so don't reassign its work.")
         elif reset and live:
@@ -1140,6 +1150,28 @@ class Supervisor:
         if st.last_working > err_ts or st.name not in self.agents or not self.active(st.name):
             return  # someone already restarted the turn
         behavior, live = "cyber_switch", self.cfg.mode("cyber_switch") == "live"
+        # Blocked while Daybreak is off (even on Daybreak Blue), Codex asks to turn it on; that replaces the prompt box.
+        if await self.act.daybreak_dialog_showing(st.name):
+            if await self.act.codex_enable_daybreak(st.name, behavior, why="cybersecurity block"):
+                await self.act.type(st.name, behavior, T.CONTINUE_CYBER, why="cybersecurity block, Daybreak on")
+                if live:
+                    self._tell(st, "Cybersecurity block: turned Daybreak on and asked it to continue.")
+            elif live:
+                self._tell(st, "Cybersecurity block: Codex asked to turn Daybreak on, and answering it failed; "
+                               "nothing more typed. It needs you.")
+            return
+        if st.name in self.cyber_return:  # on the cyber model with Daybreak on, and blocked anyway: unrecoverable
+            # ("Some cybersecurity requests are still limited, even when Daybreak is on"). Same hand-off as an agent
+            # without access: tell the GM, sync, prepare for restart; the relaunch starts on the regular model.
+            if st.project == LOCAL_PROJECT:  # no GM to restart it: the owner decides
+                if live:
+                    self._tell(st, f"Cybersecurity block again on {rot.model}; nothing typed. It needs you.")
+                return
+            if await self.act.type(st.name, behavior, T.CYBER_RESET, why=f"cybersecurity block on {rot.model}"):
+                self._tell(st, f"blocked again on {rot.model} with Daybreak on, which it can't get past; asked to tell "
+                               f"the GM, sync and prepare for restart. GM: then `restart {st.name}` (it restarts on "
+                               f"{self.cyber_return[st.name]}).")
+            return
         before = codex_status_model(await self.term.screen_text(st.name)) if self.term.bound(st.name) else None
         switched = await self.act.codex_switch_model(st.name, behavior, rot, why="cybersecurity block")
         if not switched and live:
@@ -1165,6 +1197,41 @@ class Supervisor:
         if await self.act.type(st.name, "cyber_switch", T.CYBER_RESET, why="cybersecurity block, no cyber model"):
             self._tell(st, "asked to tell the GM it can't recover from the cybersecurity block, sync and prepare "
                            "for restart.")
+
+    def _codex_launch_defaults(self, st: AgentState, behavior: str) -> None:
+        """Before a Codex relaunch: the new session starts on its regular model with Daybreak off, as a cyber switch
+        is for one session only. In the home's config.toml, `daybreak = true` goes to false (on GPT-6.2-Sol it makes
+        Codex refuse the first turn: "Daybreak support ... could not be confirmed"), and a default model left on the
+        cyber model goes back to the one the session came from (else [codex_capacity] model)."""
+        back = self.cyber_return.pop(st.name, None)
+        self._save_state()
+        path = self.cfg.agents[st.name].config_dir / "config.toml"
+        try:
+            text = path.read_text()
+        except OSError:
+            return
+        new, changed = text, []
+        if re.search(r"(?m)^daybreak\s*=\s*true\s*$", new):
+            new = re.sub(r"(?m)^daybreak\s*=\s*true\s*$", "daybreak = false", new)
+            changed.append("daybreak = false")
+        regular = back or (self.cfg.codex_rotation.model if self.cfg.codex_rotation else None)
+        cyber = self.cfg.codex_cyber.model if self.cfg.codex_cyber else None
+        m = re.search(r'(?m)^model\s*=\s*"([^"]*)"\s*$', new)
+        # Daybreak Blue is "gpt-daybreak-blue-latest" in config.toml, so match on "daybreak" as well as the label
+        on_cyber_model = m and ("daybreak" in m.group(1).lower() or (cyber and m.group(1) == _model_slug(cyber)))
+        if on_cyber_model and regular:
+            slug = _model_slug(regular)
+            new = new[:m.start()] + f'model = "{slug}"' + new[m.end():]
+            changed.append(f'model = "{slug}"')
+        if not changed:
+            return
+        if self.cfg.mode(behavior) != "live":
+            self.act.audit(st.name, behavior, self.cfg.mode(behavior), "LAUNCH_CONFIG", ", ".join(changed), str(path))
+            return
+        tmp = path.with_suffix(".toml.agent-watcher")
+        tmp.write_text(new)
+        os.replace(tmp, path)
+        self.act.audit(st.name, behavior, "live", "LAUNCH_CONFIG", ", ".join(changed), str(path))
 
     async def _cyber_switch_back(self, st: AgentState) -> None:
         """A good turn on [codex_cyber]: back to the model it had before the block, at the session's effort."""
@@ -1281,6 +1348,8 @@ class Supervisor:
                 await self.notifier.notify(f"agent-watcher: {agent}", "Agent did not exit; restart stopped")
                 return False
         st.phase = Phase.LAUNCHING
+        if a.kind == "codex":
+            self._codex_launch_defaults(st, behavior)
         await self.act.shell_pre_launch(agent, behavior)
         t1 = self.now()
         await self.act.shell_launch(agent, behavior, project, recovery=recovery)

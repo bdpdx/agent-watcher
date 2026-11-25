@@ -48,7 +48,12 @@ model the session had (from the status line; else `[codex_capacity]` model). A s
 turn gets no second switch: in a project the GM sees the refusals in the channel (and `cant_continue` applies),
 otherwise the owner is notified. Choosing Daybreak Blue in `/model` is what turns Daybreak on, so the watcher never
 types `/daybreak`: that toggle works only on GPT-6-Sol, and on GPT-6.2-Sol (with `daybreak = true` saved in the
-home's config.toml) Codex refuses every turn with "Daybreak support … could not be confirmed".
+home's config.toml) Codex refuses every turn with "Daybreak support … could not be confirmed". If Codex then asks
+"Turn on Daybreak for your next request?" (Daybreak Blue with Daybreak off), the watcher answers "Enable Daybreak"
+and asks it to continue. Blocked again on Daybreak Blue with Daybreak on ("Some cybersecurity requests are still
+limited, even when Daybreak is on") is unrecoverable: the agent gets the same sync-for-restart hand-off as an agent
+without access (below). Every Codex relaunch starts on the regular model with Daybreak off: the watcher sets
+`daybreak = false`, and a default model left on the cyber model back, in the home's config.toml.
 
 Only the agents listed in `[codex_cyber] agents` have access to that model; with no list, every Codex agent does.
 An agent in a project without access (or with no `[codex_cyber]` at all) can't get past the block, so instead of
